@@ -487,7 +487,14 @@ inline void reconfig_packer_data_format(
     LLK_ASSERT(num_faces == 1 || num_faces == 2 || num_faces == 4, "num_faces must be 1, 2, or 4");
     const std::uint32_t pack_output_src_format = masked_data_format(pack_src_format);
     const std::uint32_t pack_output_dst_format = masked_data_format(pack_dst_format);
-    // Gasket converts Float16_b -> Float16 before the packer, so hardware in_data_format must be Float16 for Fp8 output.
+
+    // JIT (data_format.cpp + genfiles.cpp) is responsible for selecting pack_src_format
+    // that matches DEST family: when any unpack input is Fp8_e4m3 the kernel runs in
+    // A-family and pack_src is Float16/Bfp8.  We trust the JIT-supplied value directly
+    // — no cross-thread read of THCON_SEC0_REG1_Unp_LF8_4b_exp.
+
+    // For Fp8_e4m3 output the gasket always requires Float16 as the packer in_data_format.
+    // For other outputs use the JIT-supplied format so the packer reads DEST with the right type.
     const std::uint32_t pack_hw_src_format =
         ((pack_dst_format & 0x1F) == to_underlying(DataFormat::Fp8_e4m3)) ? to_underlying(DataFormat::Float16) : pack_output_src_format;
 
@@ -591,6 +598,10 @@ inline void configure_pack(
 
     // Set Fp8 E4M3 mode for packer
     cfg_reg_rmw_tensix<THCON_SEC0_REG1_Pac_LF8_4b_exp_RMW>(((pack_dst_format & 0x1F) == (std::uint32_t)DataFormat::Fp8_e4m3) ? 1 : 0);
+
+    // JIT supplies pack_src_format in the correct DEST family — A-family when any
+    // unpack input is Fp8_e4m3, B-family otherwise.  Trust it directly; no read of
+    // THCON_SEC0_REG1_Unp_LF8_4b_exp (which would create a T0/T2 ordering dependency).
 
     cfg_reg_rmw_tensix<ALU_FORMAT_SPEC_REG2_Dstacc_RMW>(pack_output_src_format);
 

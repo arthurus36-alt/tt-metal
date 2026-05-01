@@ -107,9 +107,15 @@ inline void _llk_unpack_reconfig_data_format_srca_impl_(
 
     if constexpr (dim_stride_target == p_dim_stride_target::FACE_ROW_MAJOR)
     {
-        std::uint32_t unpack_ch1_x_stride = (std::uint32_t)(unpack_dst_format & 0x3) == (std::uint32_t)DataFormat::Float32   ? 4
-                                            : (std::uint32_t)(unpack_dst_format & 0x3) == (std::uint32_t)DataFormat::Float16 ? 2
-                                                                                                                             : 1;
+        // Fp8_e4m3 (0x1A) and Lf8 (0xA) collide in the lower-4-bit encoding used
+        // by (dst_format & 0x3); override stride to 2 for Fp8_e4m3 since it expands
+        // to A-family Float16 (2 bytes) in SrcA, while Lf8 (1 byte) stays in the
+        // 1-byte bucket.  See cunpack_common.h for the full explanation.
+        std::uint32_t unpack_ch1_x_stride = (std::uint32_t)(unpack_dst_format & 0x3) == (std::uint32_t)DataFormat::Float32 ? 4
+                                            : ((std::uint32_t)(unpack_dst_format & 0x3) == (std::uint32_t)DataFormat::Float16 ||
+                                               (unpack_src_format & 0x1F) == (std::uint32_t)DataFormat::Fp8_e4m3)
+                                                ? 2
+                                                : 1;
         // FACE_R_DIM constant is used here because data is not stored densely in src/dest registers
         // so we want to keep standard stride for one face
         std::uint32_t unpack_ch1_z_stride = FACE_C_DIM * FACE_R_DIM * unpack_ch1_x_stride;
@@ -159,9 +165,12 @@ inline void _llk_unpack_reconfig_data_format_srcb_impl_(
 
     if constexpr (dim_stride_target == p_dim_stride_target::FACE_ROW_MAJOR)
     {
-        std::uint32_t unpack_ch1_x_stride = (std::uint32_t)(unpack_dst_format & 0x3) == (std::uint32_t)DataFormat::Float32   ? 4
-                                            : (std::uint32_t)(unpack_dst_format & 0x3) == (std::uint32_t)DataFormat::Float16 ? 2
-                                                                                                                             : 1;
+        // See srca variant above for the Fp8_e4m3 / Lf8 encoding-collision rationale.
+        std::uint32_t unpack_ch1_x_stride = (std::uint32_t)(unpack_dst_format & 0x3) == (std::uint32_t)DataFormat::Float32 ? 4
+                                            : ((std::uint32_t)(unpack_dst_format & 0x3) == (std::uint32_t)DataFormat::Float16 ||
+                                               (unpack_src_format & 0x1F) == (std::uint32_t)DataFormat::Fp8_e4m3)
+                                                ? 2
+                                                : 1;
         std::uint32_t unpack_ch1_z_stride = FACE_C_DIM * FACE_R_DIM * unpack_ch1_x_stride;
         cfg_reg_rmw_tensix<UNP1_ADDR_CTRL_ZW_REG_1_Zstride_RMW>(unpack_ch1_z_stride);
 

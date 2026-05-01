@@ -744,12 +744,19 @@ inline void configure_unpack_AB(
     // Get pointer to registers for current state ID
     volatile std::uint32_t tt_reg_ptr *cfg = get_cfg_pointer();
 
-    std::uint32_t unpA_ch1_x_stride = (unpA_dst_format_masked & 0x3) == to_underlying(DataFormat::Float32)   ? 4
-                                      : (unpA_dst_format_masked & 0x3) == to_underlying(DataFormat::Float16) ? 2
-                                                                                                             : 1;
-    std::uint32_t unpB_ch1_x_stride = (unpB_dst_format_masked & 0x3) == to_underlying(DataFormat::Float32)   ? 4
-                                      : (unpB_dst_format_masked & 0x3) == to_underlying(DataFormat::Float16) ? 2
-                                                                                                             : 1;
+    // Fp8_e4m3 (0x1A) and Lf8 (0xA) share the lower-4-bit encoding 0xA.  After
+    // (dst_format_masked & 0x3) the lookup lands in the 1-byte stride bucket,
+    // which is correct for Lf8 (1-byte L1, no register expansion) but wrong for
+    // Fp8_e4m3 (expands to A-family Float16 = 2 bytes in SrcA/SrcB).  Override
+    // explicitly when src is Fp8_e4m3 — the bit-trick cannot distinguish the two.
+    std::uint32_t unpA_ch1_x_stride =
+        (unpA_dst_format_masked & 0x3) == to_underlying(DataFormat::Float32)                                                               ? 4
+        : ((unpA_dst_format_masked & 0x3) == to_underlying(DataFormat::Float16) || unpA_src_format == to_underlying(DataFormat::Fp8_e4m3)) ? 2
+                                                                                                                                           : 1;
+    std::uint32_t unpB_ch1_x_stride =
+        (unpB_dst_format_masked & 0x3) == to_underlying(DataFormat::Float32)                                                               ? 4
+        : ((unpB_dst_format_masked & 0x3) == to_underlying(DataFormat::Float16) || unpB_src_format == to_underlying(DataFormat::Fp8_e4m3)) ? 2
+                                                                                                                                           : 1;
     std::uint32_t unpA_ch1_z_stride = FACE_C_DIM * FACE_R_DIM * unpA_ch1_x_stride;
     std::uint32_t unpB_ch1_z_stride = FACE_C_DIM * FACE_R_DIM * unpB_ch1_x_stride;
     std::uint32_t exp_width         = (static_cast<std::uint32_t>(unpA_dst_format_masked) >> 2) & 0x1; // 0=5-bit, 1=8-bit

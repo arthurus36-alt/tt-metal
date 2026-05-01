@@ -99,13 +99,26 @@ DataFormat check_valid_formats_in_out_data_formats(std::span<const DataFormat> d
 }
 
 ExpPrecision get_data_exp_precision(std::span<const DataFormat> data_formats) {
+    // Fp8_e4m3 in an unpack-input CB position (c_0..c_15, c_24..c_31 — inputs
+    // and intermediates per hostdevcommon/kernel_structs.h) forces the kernel
+    // to A-family: Fp8 expands to A-family Float16 in SrcA/SrcB at unpack, so
+    // DEST is A-family Float16 regardless of any B-family inputs or outputs.
+    // Output-only positions (c_16..c_23) don't affect DEST family.
+    constexpr size_t FIRST_OUTPUT_CB = 16;
+    constexpr size_t FIRST_INTERMED_CB = 24;
+    const size_t n = data_formats.size();
+    for (size_t i = 0; i < n; ++i) {
+        const bool is_input_position = (i < FIRST_OUTPUT_CB) || (i >= FIRST_INTERMED_CB);
+        if (is_input_position && data_formats[i] == DataFormat::Fp8_e4m3) {
+            return ExpPrecision::A;
+        }
+    }
     DataFormat last_valid_format = check_consistent_format_across_buffers(data_formats);
     if (last_valid_format == DataFormat::Invalid) {
-        // No valid format found (e.g. all CBs are Float32 or integer formats, which
-        // check_consistent_format_across_buffers skips). tt-metal does not ship A-family
-        // floats (Float16/Bfp8/Bfp4/Bfp2), so default to B so the conditional unpack-dst
-        // selection picks Float16_b instead of Float16. Float16 has a 5-bit exponent that
-        // would silently cap fp32 magnitudes when paired with fp32 src (issue #43229).
+        // No A/B-family floats anywhere (e.g. all Float32/integer). Default to B
+        // since tt-metal does not ship A-family floats (Float16/Bfp8/Bfp4/Bfp2)
+        // and Float16 has a 5-bit exponent that would silently cap fp32
+        // magnitudes when paired with fp32 src (#43229).
         return ExpPrecision::B;
     }
     return get_exp_precision(last_valid_format);
