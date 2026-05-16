@@ -118,6 +118,12 @@ class MathOperation(Enum):
     SfpuElwdiv = OpSpec("DIV", MathOpType.SFPU_BINARY)
     SfpuElwrsub = OpSpec("RSUB", MathOpType.SFPU_BINARY)
     SfpuElwpow = OpSpec("POW", MathOpType.SFPU_BINARY)
+    SfpuElwLt = OpSpec("LT", MathOpType.SFPU_BINARY)
+    SfpuElwGt = OpSpec("GT", MathOpType.SFPU_BINARY)
+    SfpuElwLe = OpSpec("LE", MathOpType.SFPU_BINARY)
+    SfpuElwGe = OpSpec("GE", MathOpType.SFPU_BINARY)
+    SfpuElwEq = OpSpec("EQ", MathOpType.SFPU_BINARY)
+    SfpuElwNe = OpSpec("NE", MathOpType.SFPU_BINARY)
 
     # =============================================================================
     # SFPU TERNARY OPERATIONS
