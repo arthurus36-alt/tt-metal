@@ -140,32 +140,20 @@ Order is by **expected-win ÷ risk**. Each task lists: prereqs, files, sketch, e
 
 ---
 
-### Task 1 — Host harness fix: lift Bfp8 `max_block_dim` cap (0.5 day)
+### Task 1 — Investigate Bfp8 `max_block_dim` cap (DROPPED — not over-conservative)
 
-**Gap:** G8.
-**Files:** `tt_metal/tt-llk/tests/python_tests/perf_pack_untilize.py:62-68`.
+**Original gap (G8):** suspected harness-side cap that could be lifted.
 
-**Sketch:**
-```python
-# Before:
-max_block_dim = 4 if formats.input_format.is_32_bit() else 8
-if (formats.input_format in (DataFormat.Float16_b, DataFormat.Bfp8_b)
-    and formats.output_format == DataFormat.Float16):
-    max_block_dim = 4   # ← this is the cliff
+**Finding (2026-05-16):** The cap is a real HW constraint, not a harness artifact. Flows from `is_format_combination_outlier` in `helpers/data_format_inference.py:106`:
+- 8-bit exponent input (Float16_b, Bfp8_b) → Float16 output, dest_acc=No is an HW outlier — *cannot convert directly without storing as 32-bit intermediate in dest.*
+- Dest silently widens to 32-bit → `max_tiles_in_dest = 8 // 2 = 4`.
+- For dest_acc=Yes, same constraint applies via the standard fp32-dest path.
 
-# After: investigate WHY max=4 for these cases.
-# Hypothesis: it's a residue from when MAX_TILES_DEST=4 globally;
-# Bfp8_b input is 1-byte, doesn't hit the 32-bit dest path.
-# Likely safe to lift to 8 for Bfp8_b→FP16; keep 4 only where genuinely needed.
-```
+**Why ct=5/7 cliff persists:** divisors of 5 ≤ 4 = {1}; divisors of 7 ≤ 4 = {1}. The LLK has `static_assert(full_ct_dim % block_ct_dim == 0)` (`llk_pack_untilize.h:147`). To eliminate the cliff would require either:
+- Relaxing the LLK to support non-uniform block sizes (e.g. ct=5 = [4,1] blocks) — significant LLK change, separate work.
+- Caller-side split: caller issues two pack_untilize calls (4+1). This is a tt-metal op-level change, not LLK.
 
-Verify by removing the gate selectively and rerunning. If a variant fails functionally, narrow the condition.
-
-**Expected win:** Bfp8→FP16 ct=5 and ct=7 drop from ~460 → ~190 cyc/tile (≈2.4× on those shapes). No win on already-good shapes.
-
-**Validation:** rerun `perf_pack_untilize.py`, diff vs baseline. Functional PASS for all 832 currently-passing variants.
-
-**Rollback:** revert one-line condition.
+**Decision:** Drop T1 from Path A. Document the ct=5/7 cliff as a known structural limit. Revisit as a separate workstream if Conv/DeepSeek hit it on production shapes.
 
 ---
 
@@ -239,7 +227,38 @@ Move the per-row Y increment into the AddrMod of the PACR itself; eliminate the 
 
 ---
 
-### Task 4 — Ch1 (output side) counters (#42052) (3 days)
+### Task 4 — Ch1 (output side) counters (#42052) — ATTEMPTED, REVERTED (silicon evidence: BH has 256B mask)
+
+**Status (2026-05-16):** Implemented and tested on silicon. Reverted; functional regression on small strides.
+
+**What was tried:**
+1. `_llk_pack_untilize_configure_addrmod_`: added `.y_dst.incr=1` to `ADDR_MOD_1` so the row-closing PACR auto-advances ch1.Y post-PACR.
+2. `_llk_pack_untilize_init_`: programmed `PCK0_ADDR_CTRL_XY_REG_1_Ystride = output_addr_offset / 16`. Removed the SCRATCH_SEC2 setup (no CFGSHIFTMASK needed).
+3. `_llk_pack_untilize_mop_config_`: removed the `load_replay_buf` and the `set_end_op(replay)` entirely. End-ops default to NOP.
+4. `_llk_pack_untilize_`: SETADCXY BitMask `0b0011` → `0b1111` to reset ch1.X and ch1.Y at start of each pack call. Kept the between-face-passes ch0.Y-only reset so ch1.Y continues 16 → 32 across top/bottom passes.
+
+**Findings (silicon p100a):**
+- perf_pack_untilize.py: 832 passed (kernel doesn't hang) — but **perf harness doesn't validate output correctness** (`helpers/perf.py` measures cycles only).
+- test_zzz_pack_untilize.py: **FAILED at the very first variant** (`Float16_b→Float16_b, [64,64]`, ct=2 → 128 B/row → 8 in 16B units → masks to 0). Output rows all wrote to the same base address. Golden-tensor mismatch.
+
+**Conclusion:** BH applies the same `(YZW_Addr & ~0xf)` 16B-unit mask documented in the WH ISA — confirmed empirically. Effective per-row stride floor is **256 bytes**. For our perf sweep:
+- ct=1..3 (FP16: 64..192 B/row) — broken
+- ct=4 (FP16: 256 B/row) — works
+- ct=5..7 (320..448 B/row, not multiples of 256) — broken (truncated to 256)
+- ct=8 (512 B/row, multiple of 256) — works
+
+T4 as a drop-in replacement for CFGSHIFTMASK is **not viable** because most shapes hit the mask. Two ways forward (both out of Path A scope):
+
+1. **Conditional T4:** gate ch1.Y path behind `output_addr_offset % 256 == 0`; fall back to T2 CFGSHIFTMASK for small strides. Adds two MOP variants. Win only on ct=4, ct=8.
+2. **Extend craq-sim** to model packer ch1.Y/Z/W → confirm the `~0xf` mask in software model → then revisit T4 design with full understanding.
+
+**Reverted to T3 state.** Diff: `git show 0a16daf4b4b` (T3 commit unchanged). Functional test_zzz_pack_untilize.py passes (156 / 100 skip).
+
+**For the record:** the mask hypothesis is now confirmed (was speculation before). Update `[[bh_pack_untilize_perf]]` memory with this finding.
+
+### Task 4 (deferred) — original sketch retained below for reference
+
+**Original Gap:** G5.
 
 **Gap:** G5.
 **Files:** `llk_pack_untilize.h` (MOP), `cpack_common.h` (addr ctrl programming).
@@ -352,11 +371,11 @@ Pre-stage next iter's config in inactive bank while current iter is packing. Eli
 
 | Task | Issue | Status | Est | Expected win |
 |---|---|---|---|---|
-| T0 Baseline + infra | — | not started | 1d | 0% |
-| T1 Bfp8 max_block_dim | local | not started | 0.5d | 2.4× ct=5/7 only |
-| T2 CFGSHIFTMASK pack | #42050 | not started | 3d | 10-20% |
-| T3 AddrMod | #42051 | not started | 4d | +5-10% |
-| T4 Ch1 counters | #42052 | not started | 3d | synergistic |
+| T0 Baseline + infra | — | **done** (c1e7b2d7d1f) | 1d | 0% |
+| T1 Bfp8 max_block_dim | local | **dropped** | 0.5d | — (HW limit, not harness) |
+| T2 CFGSHIFTMASK pack | #42050 | **done** (76452552f02) | 3d | -26.7% L1_TO_L1 mean (max -47.5%) |
+| T3 AddrMod | #42051 | **done** (0a16daf4b4b) | 4d | -5.2% on top of T2 (cumulative -30.2%) |
+| T4 Ch1 counters | #42052 | **attempted, reverted** | 3d | BH applies WH-style 16B-mask → broken for <256B strides |
 | T5 4-intf + dirty dest | #42048 + #42049 | not started | 8d | 30-50% (structural) |
 | T6 Unpack | (no issue yet) | not started | 3d | 5-10% |
 | T7 DeepSeek integ smoke | — | not started | 1d | verify |
