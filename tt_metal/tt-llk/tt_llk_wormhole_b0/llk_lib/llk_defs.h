@@ -141,7 +141,7 @@ Stochastic rounding modes:
     is in data format conversion stage from pack_src_format to pack_dst_format.
     All: Enables fpu, pack and gasket rounding.
 */
-enum struct StochRndType
+enum class StochRndType : std::uint8_t
 {
     None = 0,
     Fpu  = 1,
@@ -150,7 +150,7 @@ enum struct StochRndType
 };
 
 // This is populated per Wormhole ISA for SFPLOAD/SFPSTORE instructions.
-enum InstrModLoadStore
+enum class InstrModLoadStore : std::uint8_t
 {
     DEFAULT       = 0,
     FP16A         = 1,
