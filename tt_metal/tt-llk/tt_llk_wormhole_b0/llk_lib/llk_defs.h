@@ -95,7 +95,7 @@ enum src_op_id_e
     OP_SRC4 = 4,
 };
 
-enum local_op_id_e
+enum class local_op_id_e : std::uint8_t
 {
     OP_LOCAL0 = 0,
     OP_LOCAL1 = 1,
@@ -104,7 +104,7 @@ enum local_op_id_e
     OP_LOCAL4 = 4,
 };
 
-enum out_op_id_e
+enum class out_op_id_e : std::uint8_t
 {
     OUT_ID0 = 0,
     OUT_ID1 = 1,
