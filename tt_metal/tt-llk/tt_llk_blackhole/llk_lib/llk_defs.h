@@ -28,13 +28,13 @@ enum ReduceDim
     REDUCE_SCALAR,
 };
 
-enum TileDim
+enum class TileDim : std::uint8_t
 {
     R_IDX = 0,
     C_IDX = 1,
 };
 
-enum PoolType
+enum class PoolType : std::uint8_t
 {
     SUM,
     AVG,
