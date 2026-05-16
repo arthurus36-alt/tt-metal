@@ -86,7 +86,7 @@ enum class Transpose : std::uint8_t
     Both      = 3,
 };
 
-enum src_op_id_e
+enum class src_op_id_e : std::uint8_t
 {
     OP_SRC0 = 0,
     OP_SRC1 = 1,
@@ -95,7 +95,7 @@ enum src_op_id_e
     OP_SRC4 = 4,
 };
 
-enum local_op_id_e
+enum class local_op_id_e : std::uint8_t
 {
     OP_LOCAL0 = 0,
     OP_LOCAL1 = 1,
