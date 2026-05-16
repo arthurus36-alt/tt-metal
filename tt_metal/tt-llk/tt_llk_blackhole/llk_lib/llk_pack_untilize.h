@@ -19,10 +19,19 @@ using namespace ckernel::packer;
 
 inline void _llk_pack_untilize_configure_addrmod_()
 {
+    // ADDR_MOD_0: used by every inner-loop PACR. y_src stays put (W advances via INCADCZW).
     addr_mod_pack_t {
         .y_src = {.incr = 0, .clr = 0},
     }
         .set(ADDR_MOD_0);
+
+    // ADDR_MOD_1: used by the row-closing PACR (set_last_inner_loop_instr).
+    // y_src.incr=1 folds the per-row "advance Dst face-row" into the PACR itself,
+    // replacing the explicit INCADCXY that previously ran as end_op0.
+    addr_mod_pack_t {
+        .y_src = {.incr = 1, .clr = 0},
+    }
+        .set(ADDR_MOD_1);
 }
 
 /*
@@ -104,19 +113,20 @@ inline void _llk_pack_untilize_mop_config_(const std::uint32_t face_r_dim = FACE
             TTI_NOP;
         });
 
-    // After the inner loop finishes, move to the next row in the block, and update L1 address.
-    tmp.set_end_ops(TT_OP_INCADCXY(p_setadc::PAC, 0, 0, 1, 0), lltt::replay_insn(ckernel::packer::replay_buf_offset, replay_buf_len));
+    // After the inner loop finishes, update L1 address. The "advance Dst face-row" is folded
+    // into the row-closing PACR's AddrMod (ADDR_MOD_1, set below), so no INCADCXY end_op is needed.
+    tmp.set_end_op(lltt::replay_insn(ckernel::packer::replay_buf_offset, replay_buf_len));
 
     /*
     Close the row in the block by setting the Last bit to 1 in the last inner loop instruction.
-    This will allow the L1 address to be updated for the next row.
+    Use ADDR_MOD_1 so the packer auto-advances y_src by 1 (next row in face) post-PACR.
     Revisit after #22820 to convert last_loop_op to constexpr.
     */
     std::uint32_t last_loop_op = TT_OP_PACR(
         p_pacr::CFG_CTXT_0,
         p_pacr::NO_ROW_PAD_ZERO,
         p_pacr::DST_ACCESS_STRIDED_MODE,
-        ADDR_MOD_0,
+        ADDR_MOD_1,
         p_pacr::ADDR_CNT_CTXT_0,
         0,
         PACK_INTF_SEL,
