@@ -689,32 +689,63 @@ inline void program_packer_destination(std::uint32_t addr)
     TTI_DMANOP; // One NOP should be enough for WRCFG due to SETDMAREG above.
 }
 
-// RT: If multiple contexts are used, for issue #https://github.com/tenstorrent/tt-llk-bh/issues/20
-// then this function needs to be re-written
+// T5 (#42048): program four L1_Dest_addr cfg slots for the 4-packer-interface
+// pack_untilize fast path. Each packer i writes one quarter of the output L1
+// strip (8 of the 32 face-rows), offset by `i * block_size` bytes from the base.
+//
+// `addr` is in 16B units (matches program_packer_destination convention and
+// PERF_ADDRESS macro). cfg registers store 16B-unit addresses, so all per-
+// packer offsets are scaled by /16.
+//
+// block_size (bytes) = full_ct_dim * TILE_C_DIM * (TILE_R_DIM/4) * bpe
+//                    = 8 rows of the output strip
+// offsets in 16B units = {0, block_size/16, 2*block_size/16, 3*block_size/16}
+//
+// L1_Dest_addr cfg slots map to packer interfaces 0..3:
+//   SEC0_REG1 -> packer 0   (rows  0..7  of strip)
+//   SEC0_REG8 -> packer 1   (rows  8..15)
+//   SEC1_REG1 -> packer 2   (rows 16..23)
+//   SEC1_REG8 -> packer 3   (rows 24..31)
+//
+// The high-bit-31 flag is set on the upper-halfword write (same pattern as
+// program_packer_destination — L1 access flag).
 template <std::uint32_t block_ct_dim, std::uint32_t full_ct_dim, bool diagonal = false>
 inline void program_packer_untilized_destination(const std::uint32_t addr, const std::uint32_t pack_dst_format)
 {
-    // const uint32_t block_size = SCALE_DATUM_SIZE(pack_dst_format, full_ct_dim * TILE_C_DIM * (TILE_R_DIM/4));
-    // constexpr uint32_t offset0 = 0;
-    // const uint32_t offset1 = (1*block_size)/16;
-    // const uint32_t offset2 = (2*block_size)/16;
-    // const uint32_t offset3 = (3*block_size)/16;
+    LLK_ASSERT(is_valid_L1_address(addr), "L1 address must be in valid L1 memory region");
 
-    // TT_SETDMAREG(0, LOWER_HALFWORD(addr+offset0), 0, LO_16(p_gpr_pack::OUTPUT_ADDR+0));
-    // TT_SETDMAREG(0, UPPER_HALFWORD(addr+offset0), 0, HI_16(p_gpr_pack::OUTPUT_ADDR+0));
-    // TT_SETDMAREG(0, LOWER_HALFWORD(addr+offset1), 0, LO_16(p_gpr_pack::OUTPUT_ADDR+1));
-    // TT_SETDMAREG(0, UPPER_HALFWORD(addr+offset1), 0, HI_16(p_gpr_pack::OUTPUT_ADDR+1));
-    // TT_SETDMAREG(0, LOWER_HALFWORD(addr+offset2), 0, LO_16(p_gpr_pack::OUTPUT_ADDR+2));
-    // TT_SETDMAREG(0, UPPER_HALFWORD(addr+offset2), 0, HI_16(p_gpr_pack::OUTPUT_ADDR+2));
-    // TT_SETDMAREG(0, LOWER_HALFWORD(addr+offset3), 0, LO_16(p_gpr_pack::OUTPUT_ADDR+3));
-    // TT_SETDMAREG(0, UPPER_HALFWORD(addr+offset3), 0, HI_16(p_gpr_pack::OUTPUT_ADDR+3));
-    // TTI_STALLWAIT(p_stall::STALL_CFG, p_stall::THCON);
+    const std::uint32_t block_size_bytes = SCALE_DATUM_SIZE(pack_dst_format, full_ct_dim * TILE_C_DIM * (TILE_R_DIM / 4));
+    const std::uint32_t block_size_16b   = block_size_bytes / 16;
 
-    // TTI_WRCFG(p_gpr_pack::OUTPUT_ADDR, 0, THCON_SEC0_REG1_L1_Dest_addr_ADDR32);
-    // TTI_WRCFG(p_gpr_pack::OUTPUT_ADDR+1, 0, THCON_SEC0_REG8_L1_Dest_addr_ADDR32);
-    // TTI_WRCFG(p_gpr_pack::OUTPUT_ADDR+2, 0, THCON_SEC1_REG1_L1_Dest_addr_ADDR32);
-    // TTI_WRCFG(p_gpr_pack::OUTPUT_ADDR+3, 0, THCON_SEC1_REG8_L1_Dest_addr_ADDR32);
-    // TTI_NOP; TTI_NOP;
+    // Per-packer addresses in 16B units (addr is already in 16B units).
+    const std::uint32_t addr0 = addr + 0 * block_size_16b;
+    const std::uint32_t addr1 = addr + 1 * block_size_16b;
+    const std::uint32_t addr2 = addr + 2 * block_size_16b;
+    const std::uint32_t addr3 = addr + 3 * block_size_16b;
+
+    // Bit-31 flag on upper half of each addr — matches program_packer_destination idiom.
+    const std::uint32_t flag0 = (1U << 31) | addr0;
+    const std::uint32_t flag1 = (1U << 31) | addr1;
+    const std::uint32_t flag2 = (1U << 31) | addr2;
+    const std::uint32_t flag3 = (1U << 31) | addr3;
+
+    TT_SETDMAREG(0, LOWER_HALFWORD(addr0), 0, LO_16(p_gpr_pack::OUTPUT_ADDR + 0));
+    TT_SETDMAREG(0, UPPER_HALFWORD(flag0), 0, HI_16(p_gpr_pack::OUTPUT_ADDR + 0));
+    TT_SETDMAREG(0, LOWER_HALFWORD(addr1), 0, LO_16(p_gpr_pack::OUTPUT_ADDR + 1));
+    TT_SETDMAREG(0, UPPER_HALFWORD(flag1), 0, HI_16(p_gpr_pack::OUTPUT_ADDR + 1));
+    TT_SETDMAREG(0, LOWER_HALFWORD(addr2), 0, LO_16(p_gpr_pack::OUTPUT_ADDR + 2));
+    TT_SETDMAREG(0, UPPER_HALFWORD(flag2), 0, HI_16(p_gpr_pack::OUTPUT_ADDR + 2));
+    TT_SETDMAREG(0, LOWER_HALFWORD(addr3), 0, LO_16(p_gpr_pack::OUTPUT_ADDR + 3));
+    TT_SETDMAREG(0, UPPER_HALFWORD(flag3), 0, HI_16(p_gpr_pack::OUTPUT_ADDR + 3));
+
+    TTI_STALLWAIT(p_stall::STALL_CFG, p_stall::THCON);
+
+    TTI_WRCFG(p_gpr_pack::OUTPUT_ADDR + 0, 0, THCON_SEC0_REG1_L1_Dest_addr_ADDR32);
+    TTI_WRCFG(p_gpr_pack::OUTPUT_ADDR + 1, 0, THCON_SEC0_REG8_L1_Dest_addr_ADDR32);
+    TTI_WRCFG(p_gpr_pack::OUTPUT_ADDR + 2, 0, THCON_SEC1_REG1_L1_Dest_addr_ADDR32);
+    TTI_WRCFG(p_gpr_pack::OUTPUT_ADDR + 3, 0, THCON_SEC1_REG8_L1_Dest_addr_ADDR32);
+    TTI_DMANOP;
+    TTI_DMANOP;
 }
 
 inline void program_packer_dest_offset_registers(std::uint32_t dest_tile_offset)
