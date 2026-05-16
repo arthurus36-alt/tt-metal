@@ -339,6 +339,35 @@ Recommended next steps when work resumes:
 - Add Dst-introspection (print first N Dst rows post-math) to verify layout
 - Implement block_ct_dim=1 fallback path FIRST, validate PCC, then scale up to 4
 
+**T5.3d session 2 attempts (2026-05-16 follow-up):**
+- Tried craq-sim functional sim — `UnsupportedFunctionality: bar0 offset=0x1fc00530 size=8`. tt-umd writes BH TLB cfg as 8-byte, sim only accepts 4-byte. Affects ALL tests through ttsim — not specific to T5. Env compat issue, out of scope to fix here.
+- Re-derived math layout from fast_tilize comments: math produces **8 data + 8 gap pattern**, not dense 4-tile stacking. My MOP assumed dense layout. PCC fails because PACR reads at strides (0, +16, +32, +48) hit gap rows for half the iterations.
+- gdb on craq-sim possible but blocked by same tt-umd compat issue (the test never reaches PACR execution).
+
+Definitive blockers for T5 silicon iteration:
+1. **Math layout assumption is wrong.** Need to either (a) use 8-data-+8-gap-aware MOP (skip gaps via doubled y-advance), or (b) write a NEW math LLK for pack_untilize that produces dense Dst layout.
+2. **No fast functional iteration tool.** craq-sim broken in our env; silicon round-trip is 75s/iter; gdb-on-sim blocked.
+
+Realistic continuation path:
+- **Option X:** Write a "math layout dump" test that just runs math then prints Dst contents (via SFPU). One-time investment, unblocks debugging.
+- **Option Y:** Skip math co-design entirely; use option (a) — adjust MOP to use y_stride=2*32=64 to skip gap rows. Still uses fast_tilize math, no new math LLK needed.
+
+Option Y is the cheaper next attempt.
+
+**Deeper analysis (2026-05-16 session 3 followup):**
+
+Re-derived fast_tilize's actual Dst layout vs what 4-interface STRIDED PACR can produce for RM-strip output:
+- fast_tilize math produces 8-data-rows + 8-gap-rows per group, 8 groups × 16 rows = 128 Dst rows per dvalid (4 dvalids = 512 rows = 1 half-bank)
+- 4-intf STRIDED reads at (0, +16, +32, +48): reads 4 data groups simultaneously, 1 row each → 64 datums concatenated
+- For TILE format L1, these 64 datums correctly assemble as 4 face-rows of 1 face
+- For RM strip format L1, would need DIFFERENT Dst layout where the 4 reads give consecutive RM rows of 4 different tiles
+
+**Verdict:** fast_tilize math's natural Dst layout CANNOT be re-purposed for fast_untilize via cleverer pack-side stride/AddrMod. Real T5 requires NEW math LLK producing an interleaved Dst layout specifically designed for RM-strip readout. This is the full #42049 scope.
+
+Realistic T5 = 12-15 days (matches updated estimate). Math LLK design is the load-bearing piece. The pack-side MOP from T5.3b is a reasonable scaffold but won't pass PCC against fast_tilize math.
+
+**Other sim path not tried in session:** vanilla ttsim from https://github.com/tenstorrent/ttsim-private — may have the tt-umd 8-byte TLB compat fix that craq-sim lacks. Worth a future-session attempt to unblock functional debugging.
+
 ### Task 5 — `dirty tile layout` in Dst + 4 packer interfaces (#42048 + #42049) (originally 8 days, now larger)
 
 **Gap:** G1, G2, G6.
