@@ -104,7 +104,7 @@ enum local_op_id_e
     OP_LOCAL4 = 4,
 };
 
-enum out_op_id_e
+enum class out_op_id_e : std::uint8_t
 {
     OUT_ID0 = 0,
     OUT_ID1 = 1,
@@ -113,7 +113,7 @@ enum out_op_id_e
     OUT_ID4 = 4,
 };
 
-enum ReluType
+enum class ReluType : std::uint8_t
 {
     NO_RELU,
     ZERO_RELU,
