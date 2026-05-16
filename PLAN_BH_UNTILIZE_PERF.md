@@ -276,7 +276,37 @@ Configure ch1 strides at init so that `INCADCXY/ZW` auto-advances the L1 destina
 
 ---
 
-### Task 5 — `dirty tile layout` in Dst + 4 packer interfaces (#42048 + #42049) (8 days, biggest structural change)
+### T5 design correction (2026-05-16): BH packer model is radically different from WH
+
+**Findings after deeper craq-sim source + LLK code survey (branch `pjosipovic/bh-untilize-t5`):**
+
+1. BH has **1 packer with 4 read interfaces** (`cpack_common.h:24` `NUM_PACKERS = 1`). WH has 4 independent packers. The "4-way parallel" mental model lifted from WH is **wrong for BH**.
+
+2. The constant `p_pacr::ALL_INTF_ACTIVE = 0b0000` on BH enables all 4 read interfaces, multiplying the per-PACR datum count by 4. Per `craq-sim/src/tensix.cpp:2675-2685`:
+   ```c
+   if (!read_intf_sel) { count *= 4; }
+   else { count *= __builtin_popcount(read_intf_sel); }
+   constexpr uint32_t n_packers = 1;
+   ```
+3. **Only 1 L1_Dest_addr cfg slot (SEC0_REG1) is consumed on BH.** craq-sim gates reads of SEC0_REG8/SEC1_REG1/SEC1_REG8 behind `#if TT_VERSION == 0` (WH only). Every silicon-validated BH ALL_INTF_ACTIVE callsite (`llk_pack.h:252`, `llk_pack_untilize.h:58` dense path, `experimental/llk_pack_fast_tilize.h`, `experimental/llk_pack_block.h`) programs exactly one L1 cfg slot via `program_packer_destination`.
+
+4. **L1 output of one PACR is a single contiguous byte run** (`craq-sim/src/tensix.cpp:3183-3201`). The 4 interfaces *concatenate* their Dst reads into one L1 write — there's no L1-side fan-out. STRIDED_MODE only affects which 4 Dst row groups feed the interfaces (`pack_row + 16*(i/ROW_SIZE)`); it does not split the L1 destination.
+
+5. **Implication for pack_untilize:** ALL_INTF_ACTIVE on the current Dst layout would read 4 face-rows of the **same** tile (Dst rows R, R+16, R+32, R+48 — the 4 quadrants of one tile) and concatenate them into one L1 byte run. This is the WRONG layout for an L1-row-major strip — adjacent L1 bytes should hold face-rows of *different tiles*, not different faces of the same tile.
+
+**Two viable T5 paths (both invasive):**
+
+**T5-A: Generalize the existing `dense` mode.** `dense=true` already uses ALL_INTF_ACTIVE on BH (`llk_pack_untilize.h:51-58`) for the num_faces=2 case where two 16x32 tiles laid out in Dst look like one 4-face tile to the packer. Extending to num_faces=4 requires the math thread to lay out 4 tiles in Dst such that "Dst rows R, R+16, R+32, R+48" hold face-row R of tiles 0, 1, 2, 3 respectively. **The current standard A2D datacopy does NOT produce this layout** — tile k normally occupies Dst rows 64·k..64·k+63 (one tile = 64 contiguous Dst rows). For T5-A, math must place tile k's face-row R at Dst row R+16·k.
+
+**T5-B: Backport fast_tilize's pack MOP wholesale.** fast_tilize already does this Dst layout via `_llk_math_fast_tilize_init_` (`addr_mod_t{.dest.incr=16}` + MOV_8_ROWS). T5 would copy fast_tilize's math + repurpose its pack MOP with a different per-PACR L1 advance pattern (untilize output is row-major across multiple tile columns, not contiguous per-tile).
+
+**Both paths require #42049 (math Dst rearrangement) to land FIRST.** The original plan called #42049 "may not be needed" — that was wrong. #42049 is the load-bearing piece; without it, no 4-interface fast path is possible on BH.
+
+**Restriction:** fast_tilize's swizzle layout fits 4 tiles per 64 Dst rows (= 1 standard tile slot). So T5 fast path is naturally constrained to `block_ct_dim = 4` (or `≤4` with padding). For workloads needing block_ct_dim=8, would need either 2 sequential fast-path calls or 2-tile-slot Dst layout.
+
+**Decision (2026-05-16):** T5 is significantly bigger than the original 8-day estimate. The math co-design (#42049) is now confirmed mandatory, and adds substantial complexity (new template path on math LLK, MOVA2D 32-bit Dst quirk, DEST remap concerns). **Re-scoping T5 to a longer multi-PR effort:** start with #42049 math implementation in isolation (silicon-validated against fast_tilize as oracle), then build pack-side T5-B atop it.
+
+### Task 5 — `dirty tile layout` in Dst + 4 packer interfaces (#42048 + #42049) (originally 8 days, now larger)
 
 **Gap:** G1, G2, G6.
 
@@ -397,7 +427,7 @@ Pre-stage next iter's config in inactive bank while current iter is packing. Eli
 | T2 CFGSHIFTMASK pack | #42050 | **done** (76452552f02) | 3d | -26.7% L1_TO_L1 mean (max -47.5%) |
 | T3 AddrMod | #42051 | **done** (0a16daf4b4b) | 4d | -5.2% on top of T2 (cumulative -30.2%) |
 | T4 Ch1 counters | #42052 | **attempted, reverted** | 3d | BH applies WH-style 16B-mask → broken for <256B strides |
-| T5 4-intf + dirty dest | #42048 + #42049 | not started | 8d | 30-50% (structural) |
+| T5 4-intf + dirty dest | #42048 + #42049 | **research underway** (branch pjosipovic/bh-untilize-t5) | 12-15d | 30-50% (structural, requires math co-design) |
 | T6 Unpack | (no issue yet) | **attempted, deferred** | 3d | 5-10% (separate branch) |
 | T7 DeepSeek integ smoke | — | not started | 1d | verify |
 | T8 Bank ping-pong | (no issue yet) | deferred | — | 2-5% |
