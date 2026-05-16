@@ -170,7 +170,7 @@ inline void _llk_pack_fast_untilize_init_(const std::uint32_t pack_src_format, c
 // One call processes one block of block_ct_dim=4 tiles.
 // Output: 4 tiles' worth of RM strip starting at `address` (in 16B units).
 template <std::uint32_t block_ct_dim = 4>
-inline void _llk_pack_fast_untilize_block_(const std::uint32_t address, const std::uint32_t num_faces = 4)
+inline void _llk_pack_fast_untilize_block_(const std::uint32_t address, [[maybe_unused]] const std::uint32_t num_faces = 4)
 {
     static_assert(block_ct_dim == 4, "T5-B fast untilize only supports block_ct_dim=4");
 
