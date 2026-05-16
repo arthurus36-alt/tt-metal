@@ -90,16 +90,17 @@ inline void _llk_pack_untilize_mop_config_(const std::uint32_t face_r_dim = FACE
     */
     tmp.set_start_op(TT_OP_ADDRCRZW(p_setadc::PAC, 0, 0, 0, 0, 0b0010 /*CH0_W*/)); // W = W_Cr (restore W to start of block)
 
-    const std::uint32_t replay_buf_len = 4;
+    const std::uint32_t replay_buf_len = 2;
     load_replay_buf(
         ckernel::packer::replay_buf_offset,
         replay_buf_len,
         []
         {
-            // Update L1 address
-            TTI_ADDDMAREG(0, p_gpr_pack::OUTPUT_ADDR, p_gpr_pack::OUTPUT_ADDR, p_gpr_pack::OUTPUT_ADDR_OFFSET);
-            TTI_STALLWAIT(p_stall::STALL_CFG, p_stall::THCON);
-            TTI_WRCFG(p_gpr_pack::OUTPUT_ADDR, 0, THCON_SEC0_REG1_L1_Dest_addr_ADDR32);
+            // THCON_SEC0_REG1_L1_Dest_addr_ADDR32 += SCRATCH_SEC[CurrentThread].val
+            // Scratch slot loaded in _llk_pack_untilize_init_ holds the per-row L1 stride.
+            // Replaces ADDDMAREG + STALLWAIT + WRCFG + NOP — saves ~3 cyc + 1 STALLWAIT per row.
+            // Mirrors llk_unpack_tilize.h:285 precedent.
+            TTI_CFGSHIFTMASK(1, 0b011, 32 - 1, 0, 0b11, THCON_SEC0_REG1_L1_Dest_addr_ADDR32);
             TTI_NOP;
         });
 
@@ -176,8 +177,15 @@ inline void _llk_pack_untilize_init_(
         output_addr_offset = SCALE_DATUM_SIZE(pack_dst_format, full_ct_dim * ((num_faces == 1) ? 1 : 2) * FACE_C_DIM);
     }
 
-    // Store 16B aligned row offset address
+    // Store 16B aligned row offset into a scratch cfg slot so the MOP replay buf can use
+    // CFGSHIFTMASK to do `THCON_SEC0_REG1_L1_Dest_addr += SCRATCH` per row.
+    // ScratchIndex=0b11 in the CFGSHIFTMASK selects SCRATCH_SEC[CurrentThread]; pack thread
+    // is TRISC2, so this slot is SCRATCH_SEC2.
     TT_SETDMAREG(0, LOWER_HALFWORD(output_addr_offset / 16), 0, LO_16(p_gpr_pack::OUTPUT_ADDR_OFFSET));
+    TT_SETDMAREG(0, UPPER_HALFWORD(output_addr_offset / 16), 0, HI_16(p_gpr_pack::OUTPUT_ADDR_OFFSET));
+    TTI_STALLWAIT(p_stall::STALL_CFG, p_stall::THCON);
+    TTI_WRCFG(p_gpr_pack::OUTPUT_ADDR_OFFSET, 0, SCRATCH_SEC2_val_ADDR32);
+    TTI_NOP;
 
     // Always include setup calls for safety (as recommended by maintainer)
     // Program packer to pack out the correct number of datums per row
