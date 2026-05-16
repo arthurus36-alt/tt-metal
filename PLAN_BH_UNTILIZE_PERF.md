@@ -336,7 +336,28 @@ This is a silicon proof that 4-intf + dirty Dst can push pack to ~3-4× faster t
 
 ---
 
-### Task 6 — Apply playbook to `unpack_untilize` (3 days, low priority)
+### Task 6 — Apply playbook to `unpack_untilize` — ATTEMPTED in session, DEFERRED
+
+**Status (2026-05-16):** Two attempts; both reverted. Needs own branch + design.
+
+**Attempt 1 — CFGSHIFTMASK port mirroring `llk_unpack_tilize.h:285,292`:**
+- Replaced 6-instr replay buf (`DMANOP + 2*UNPACR + ADDDMAREG + STALLWAIT + ADDRCRZW`) with split-context pattern (UNPACR + CFGSHIFTMASK for cntx0 / UNPACR + CFGSHIFTMASK for cntx1)
+- Problem: `unpack_untilize` MOP uses `ckernel_unpack_template(unpackB=true, halo=false)` with `A_instr = B_instr = replay(full buf)` and `skipA/skipB = WRCFG to cntx0/cntx1 offset cfg`. `unpack_tilize` uses `unpackB=false` with split halves and `skipA/skipB = 0`. Template wiring is fundamentally different — can't drop-in the unpack_tilize pattern.
+- Also missed: SCRATCH preload at init, retaining ADDRCRZW for Z reset.
+
+**Attempt 2 — drop the leading `TTI_DMANOP` (comment said it's needed for prior WRCFG retire):**
+- Removed line 29 DMANOP. Replay buf shrunk to 5 instructions.
+- Silicon **failed PCC** on first variant of `test_unpack_untilize.py`. DMANOP is genuinely required for cfg→unpacker propagation timing.
+- Reverted.
+
+**Why deferred (out of this branch):**
+- Real T6 needs to redesign the replay buf + skipA/skipB to mirror unpack_tilize's CFGSHIFTMASK pattern AND handle the cross-context offset advance AND keep the Z-counter reset behavior.
+- Per-row teardown (MULDMAREG + STALLWAIT + WRCFG) has STALLWAIT that may be ordering vs prior skipA WRCFG — can't be naively removed without race.
+- Standalone unpack_untilize KERNEL is **555 cyc/tile** at 8×8 (vs pack 101 after T2+T3), so the win is real (~5x slower than pack), but unrelated to the pack_untilize end-to-end pipeline (which uses simple unpack_A, not unpack_untilize). T6 is its own workstream.
+
+**Recommended next step:** new branch `pjosipovic/bh-unpack-untilize-perf` off main. Start with design notes mapping the `ckernel_unpack_template` slots (A/B vs skipA/skipB) to the CFGSHIFTMASK-direct pattern. Likely 3-5 days.
+
+### Task 6 (original sketch retained below) — to be revisited
 
 **Gap:** G3-like overhead in unpack side. From perf data, unpack is **less** of a bottleneck (49 cyc/tile TILE_LOOP isolated vs pack's higher overhead in pipeline), but same techniques apply.
 
@@ -377,7 +398,7 @@ Pre-stage next iter's config in inactive bank while current iter is packing. Eli
 | T3 AddrMod | #42051 | **done** (0a16daf4b4b) | 4d | -5.2% on top of T2 (cumulative -30.2%) |
 | T4 Ch1 counters | #42052 | **attempted, reverted** | 3d | BH applies WH-style 16B-mask → broken for <256B strides |
 | T5 4-intf + dirty dest | #42048 + #42049 | not started | 8d | 30-50% (structural) |
-| T6 Unpack | (no issue yet) | not started | 3d | 5-10% |
+| T6 Unpack | (no issue yet) | **attempted, deferred** | 3d | 5-10% (separate branch) |
 | T7 DeepSeek integ smoke | — | not started | 1d | verify |
 | T8 Bank ping-pong | (no issue yet) | deferred | — | 2-5% |
 
