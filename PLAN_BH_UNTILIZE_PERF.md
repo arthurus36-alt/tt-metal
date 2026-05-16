@@ -306,6 +306,19 @@ Configure ch1 strides at init so that `INCADCXY/ZW` auto-advances the L1 destina
 
 **Decision (2026-05-16):** T5 is significantly bigger than the original 8-day estimate. The math co-design (#42049) is now confirmed mandatory, and adds substantial complexity (new template path on math LLK, MOVA2D 32-bit Dst quirk, DEST remap concerns). **Re-scoping T5 to a longer multi-PR effort:** start with #42049 math implementation in isolation (silicon-validated against fast_tilize as oracle), then build pack-side T5-B atop it.
 
+**T5.X probe (2026-05-16, on `pjosipovic/bh-untilize-t5`):** Tested whether a 1-line swap (`TWO_INTFS_ACTIVE` → `ALL_INTF_ACTIVE` in pack_untilize MOP) would deliver per-PACR throughput gain — bypassing the full math+pack rewrite to see if HW count multiplier alone helps. Result on silicon:
+
+| Run-type | mean delta vs T3 | max regr |
+|--|--|--|
+| L1_TO_L1 | +0.91% | +25.2% (Bfp8→FP32) |
+| PACK_ISOLATE | +1.03% | +29.2% (Bfp8→FP32) |
+| L1_CONGESTION[PACK] | +1.07% | +30.5% |
+| L1_CONGESTION[UNPACK] | +0.02% | (unchanged, expected) |
+
+**Conclusion:** Per-PACR cycle cost scales with output datum count — emitting 64 datums (4 intfs) costs ~2× the cycles of emitting 32 (2 intfs). No net throughput multiplier from the mask alone. Bfp8→FP32 paths regress because format-conversion cost compounds.
+
+**Implication:** The fast_tilize-style win comes from **MOP structure** (16 PACRs/tile filling one contiguous L1 region with the right Dst layout), not from the mask. T5-B requires the full math + pack co-design — no shortcut exists.
+
 ### Task 5 — `dirty tile layout` in Dst + 4 packer interfaces (#42048 + #42049) (originally 8 days, now larger)
 
 **Gap:** G1, G2, G6.
