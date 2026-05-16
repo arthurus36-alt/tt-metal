@@ -368,6 +368,22 @@ Realistic T5 = 12-15 days (matches updated estimate). Math LLK design is the loa
 
 **Other sim path not tried in session:** vanilla ttsim from https://github.com/tenstorrent/ttsim-private — may have the tt-umd 8-byte TLB compat fix that craq-sim lacks. Worth a future-session attempt to unblock functional debugging.
 
+**ttsim-private attempt (2026-05-16 session 4):**
+
+Cloned and built `ttsim-private`. Same `bar0: offset=0x1fc00530 size=8` error on BH path.
+
+Applied two local patches to ttsim-private (saved at `/localdev/pjosipovic/ttsim-private-patches-bh-fix.diff`):
+1. **`src/libttsim.cpp`:** BH TLB cfg `0x1FC00000..0x1FC009D4` writes accept size=4 OR size=8 (split 8B into 2× 4B). Tt-umd writes some BH TLB regs as 8-byte.
+2. **`src/tensix.cpp` UNPACR:** When `SRCA_SET_SetOvrdWithAddr=true`, SrcA row wraps `& 0x3F` (mod 64) instead of `UndefinedBehavior`. Mirrors `tt-isa-documentation` PR #52.
+
+After patches, sim runs but hits **`TENSIX TIMED OUT … BRISC firmware did not signal boot-ready within 1.0s`** — affects even basic `test_eltwise_unary_datacopy`, not specific to T5 or fast_tilize. So tt-umd↔ttsim compat is broken at a deeper layer than these two PCIe ranges. Likely needs tt-umd downgrade or further ttsim PCIe surface patches.
+
+**Sim path remains blocked.** Next iteration needs:
+- Hunt down the BRISC firmware load PCIe write that's failing silently OR
+- Match tt-umd to the version ttsim-private was tested against (`pip show tt-umd` = 0.9.5.dev260424; ttsim-private CI uses an unknown specific version)
+
+Saving the two patches as a starting checkpoint for future-session ttsim debug. T5 iteration via sim still possible after BRISC boot issue is resolved.
+
 ### Task 5 — `dirty tile layout` in Dst + 4 packer interfaces (#42048 + #42049) (originally 8 days, now larger)
 
 **Gap:** G1, G2, G6.
