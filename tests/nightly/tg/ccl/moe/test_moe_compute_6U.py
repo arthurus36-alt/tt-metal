@@ -1053,19 +1053,41 @@ def compute_matmul_golden(
     torch_b1=None,
     torch_b2=None,
     activation_type=MoEActivationFunction.SILU,
+    num_dispatch_devices=None,
 ):
-    tokens = tokens_per_device * devices
+    # For 1xN meshes (legacy), num_dispatch_devices == devices and the math is unchanged.
+    # For multi-axis meshes with cluster_axis<full (e.g. 2x4 BH single LB with cluster_axis=1),
+    # experts are partitioned across num_dispatch_devices only, so weights must be replicated
+    # `num_dispatch_devices` times (not `devices`) to align with `experts`. The non-dispatch axis
+    # copies are byte-identical to the dispatch-axis copy (same expert mapping, same tokens), so
+    # we run matmul on one copy and broadcast the result back to `devices` along dim 1 for the
+    # downstream validators that index `matmul_goldens[l, d, e, t, h]` with d in [0, devices).
+    if num_dispatch_devices is None:
+        num_dispatch_devices = devices
+    assert (
+        devices % num_dispatch_devices == 0
+    ), f"devices ({devices}) must be divisible by num_dispatch_devices ({num_dispatch_devices})"
+    num_replicated = devices // num_dispatch_devices
 
-    # (L, D, E/D, T, H) -> (L, E, T, H)
+    tokens = tokens_per_device * num_dispatch_devices
+
+    # When devices > num_dispatch_devices, the off-axis device entries in torch_input_ref are
+    # the all-zero slots left by compute_selective_tilize_golden (target_device is always on the
+    # dispatch axis), so taking the first num_dispatch_devices entries along dim 1 drops only
+    # zero-padding — never real data.
+    if devices != num_dispatch_devices:
+        torch_input_ref = torch_input_ref[:, :num_dispatch_devices, ...]
+
+    # (L, num_dispatch_devices, E/D, T, H) -> (L, E, T, H)
     torch_input_ref = torch_input_ref.reshape(layers, experts, tokens, hidden)
 
-    # in the test setup the expert weights are duplicated over devices, do so here
+    # in the test setup the expert weights are duplicated over (dispatch) devices, do so here
     # (L, E/D, K, N) -> (L, E, K, N)
-    torch_w0 = torch_w0.repeat([1, devices, 1, 1])
+    torch_w0 = torch_w0.repeat([1, num_dispatch_devices, 1, 1])
     # (L, E/D, K, N) -> (L, E, K, N)
-    torch_w1 = torch_w1.repeat([1, devices, 1, 1])
+    torch_w1 = torch_w1.repeat([1, num_dispatch_devices, 1, 1])
     # (L, E/D, N, K) -> (L, E, N, K)
-    torch_w2 = torch_w2.repeat([1, devices, 1, 1])
+    torch_w2 = torch_w2.repeat([1, num_dispatch_devices, 1, 1])
 
     # Cast to fp32 for CPU matmul: torch's bf16 CPU matmul falls through to a
     # single-threaded reference loop on many builds (even with OMP/MKL enabled),
@@ -1117,8 +1139,17 @@ def compute_matmul_golden(
     torch_output_ref = torch_output_ref.to(_orig_dtype)
 
     # pull device dim back out for comparison
-    # (L, E, T, H) -> (L, D, E/D, T, H)
-    return torch_output_ref.reshape(layers, devices, experts // devices, tokens, hidden)
+    # (L, E, T, H) -> (L, num_dispatch_devices, E/num_dispatch_devices, T, H)
+    out = torch_output_ref.reshape(layers, num_dispatch_devices, experts // num_dispatch_devices, tokens, hidden)
+
+    # Broadcast along the device dim so downstream validators that index [l, d, e, t, h] with
+    # d in [0, devices) see the same golden on every replicated-axis copy. Assumes the device
+    # layout places dispatch-axis copies contiguously, which holds for cluster_axis=1 on row-major
+    # meshes (the only case exercised today). cluster_axis=0 would need repeat_interleave instead;
+    # add an explicit branch when that path is exercised.
+    if devices != num_dispatch_devices:
+        out = out.repeat(1, num_replicated, 1, 1, 1)
+    return out
 
 
 def compute_combine_golden(
@@ -1271,6 +1302,8 @@ def run_moe_compute_test(
     enable_trace,
     activation_type,
     has_bias,
+    topology=None,
+    num_links=None,
 ):
     """
     Core test execution helper function.
@@ -1498,6 +1531,7 @@ def run_moe_compute_test(
         torch_b1=torch_b1 if has_bias else None,
         torch_b2=torch_b2 if has_bias else None,
         activation_type=activation_type,
+        num_dispatch_devices=num_dispatch_devices,
     )
     logger.info(f"Matmul goldens done (shape={tuple(matmul_goldens.shape)}, dtype={matmul_goldens.dtype})")
 
@@ -1657,6 +1691,11 @@ def run_moe_compute_test(
 
     def run_op_inner(tt_sparse_buffer, tt_expert_indices, tt_expert_scores, layer_id):
         """Core moe_compute operation"""
+        # Forward an explicit topology when supplied. The op normally derives this from the
+        # fabric config + tensor coverage via get_usable_topology(), but that heuristic
+        # marks any tensor that spans a full mesh row as WRAP/Ring — incorrect for
+        # physically-line meshes (e.g. BH single Loudbox p150_x8). When set, this lets the
+        # caller force Linear and avoid forwarding requests across non-existent wrap edges.
         return ttnn.experimental.moe_compute(
             tt_sparse_buffer,
             tt_expert_indices,
@@ -1669,6 +1708,8 @@ def run_moe_compute_test(
             intermediate_size=N,
             has_bias=has_bias,
             cluster_axis=cluster_axis,
+            topology=topology,
+            num_links=num_links,
             mux_core_range_set=mux_core_range_set,
             optional_output_tensor=tt_combine_output_tensors[layer_id],
             optional_cross_device_semaphore=combine_barrier_semaphore,
@@ -1936,8 +1977,11 @@ def test_moe_compute_bh_lb(
     activation_type = MoEActivationFunction.SILU
 
     selected_experts_k = 8
-    num_layers = 2
-    num_iterations = 2
+    # Dev/debug knobs: when triaging an on-device hang, shrink to 1 layer / 1 iteration so the
+    # watcher cycle catches the first stuck dispatch instead of accumulating across iterations.
+    # Defaults match the headline-gate run.
+    num_layers = int(os.environ.get("TT_MOE_BH_LB_LAYERS", "2"))
+    num_iterations = int(os.environ.get("TT_MOE_BH_LB_ITERS", "2"))
 
     run_moe_compute_test(
         mesh_device=mesh_device,
@@ -1956,6 +2000,17 @@ def test_moe_compute_bh_lb(
         enable_trace=False,
         activation_type=activation_type,
         has_bias=has_bias,
+        # BH single Loudbox (p150_x8) is physically a 2x4 LINE/LINE mesh — no wraparound link.
+        # The op's auto get_usable_topology() returns Ring whenever the input tensor covers a
+        # full mesh row (tensor-coverage heuristic), which sends fabric multicast requests
+        # across non-existent wrap edges (TT_FATAL "Could not find any forwarding direction
+        # from src ... to dst ..."). Force Linear here so the kernels run the line-aware path.
+        topology=ttnn.Topology.Linear,
+        # BH single LB has 2 ethernet channels between adjacent chips (per fabric error
+        # message "2 ethernet channels available to forward b/w src ... and dst ..."). The
+        # op default num_links=4 — appropriate for WH 6U — overshoots and trips the bounds
+        # check at fabric.cpp:163 with "Requested link index 2 is out of bounds". Pin to 2.
+        num_links=2,
     )
 
 
