@@ -319,6 +319,26 @@ Configure ch1 strides at init so that `INCADCXY/ZW` auto-advances the L1 destina
 
 **Implication:** The fast_tilize-style win comes from **MOP structure** (16 PACRs/tile filling one contiguous L1 region with the right Dst layout), not from the mask. T5-B requires the full math + pack co-design — no shortcut exists.
 
+**T5.3 implementation status (2026-05-16, branch `pjosipovic/bh-untilize-t5`):**
+
+Files added:
+- `tt_llk_blackhole/llk_lib/experimental/llk_pack_fast_untilize.h` (pack MOP)
+- `tests/sources/fast_untilize_test.cpp` (test source — fast_tilize unpack+math + new pack)
+- `tests/python_tests/test_fast_untilize.py` (ct=4 FP16 only)
+
+Status: **compiles clean, silicon runs without hang, PCC fails first attempt**.
+Output data is present but at wrong positions — indicates ADC strides / AddrMod chain don't match the Dst layout fast_tilize math produces.
+
+Hypotheses for next iteration:
+1. **PACR output is fixed at 64 contiguous L1 datums.** With fast_tilize pack MOP (16 PACRs/tile × 4 tiles = 64 PACRs), output is "4 contiguous tiles in tile-format". For RM strip, the per-PACR Dst reads must be CHOSEN such that the concatenated byte stream IS the RM strip ordering. Current MOP doesn't do this — it tries to swap blocks via z+=1/clr but that may not produce RM-row-major byte order.
+2. **Dst layout assumption (4 tiles vertically stacked at 16-row intervals) may not match what fast_tilize math actually produces.** Per fast_tilize comments, layout is 8-data + 8-gap pattern per tile = 128 Dst rows per tile, NOT 16. Re-derive correct stride values.
+3. **Need a simpler test case first** — block_ct_dim=1 (single tile untilize via 4 interfaces) to isolate strides+addrmod without the multi-tile complications.
+
+Recommended next steps when work resumes:
+- Cross-reference fast_tilize's per-PACR data flow against ttsim trace
+- Add Dst-introspection (print first N Dst rows post-math) to verify layout
+- Implement block_ct_dim=1 fallback path FIRST, validate PCC, then scale up to 4
+
 ### Task 5 — `dirty tile layout` in Dst + 4 packer interfaces (#42048 + #42049) (originally 8 days, now larger)
 
 **Gap:** G1, G2, G6.
@@ -440,7 +460,7 @@ Pre-stage next iter's config in inactive bank while current iter is packing. Eli
 | T2 CFGSHIFTMASK pack | #42050 | **done** (76452552f02) | 3d | -26.7% L1_TO_L1 mean (max -47.5%) |
 | T3 AddrMod | #42051 | **done** (0a16daf4b4b) | 4d | -5.2% on top of T2 (cumulative -30.2%) |
 | T4 Ch1 counters | #42052 | **attempted, reverted** | 3d | BH applies WH-style 16B-mask → broken for <256B strides |
-| T5 4-intf + dirty dest | #42048 + #42049 | **research underway** (branch pjosipovic/bh-untilize-t5) | 12-15d | 30-50% (structural, requires math co-design) |
+| T5 4-intf + dirty dest | #42048 + #42049 | **WIP — compiles+runs, PCC fails first attempt** (branch pjosipovic/bh-untilize-t5) | 12-15d | 30-50% (structural, requires math co-design) |
 | T6 Unpack | (no issue yet) | **attempted, deferred** | 3d | 5-10% (separate branch) |
 | T7 DeepSeek integ smoke | — | not started | 1d | verify |
 | T8 Bank ping-pong | (no issue yet) | deferred | — | 2-5% |
