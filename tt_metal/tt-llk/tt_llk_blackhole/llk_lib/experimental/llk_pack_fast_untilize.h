@@ -2,29 +2,44 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// BH Fast-Untilize Pack — WIP skeleton (T5-B, tt-metal#42048 + #42049).
+// BH Fast-Untilize Pack — T5-B (tt-metal#42048 + #42049).
 //
-// Goal: produce row-major L1 strip output from a swizzled DEST layout
-// emitted by `_llk_math_fast_tilize_*` (no new math LLK needed).
+// Read math DEST layout (4 tiles, ct=4 FP16) emitted by `_llk_math_fast_tilize_*`:
+//   Dst rows   0..63:  t0.F0 | t0.F1 | t1.F0 | t1.F1
+//   Dst rows  64..127: t2.F0 | t2.F1 | t3.F0 | t3.F1
+//   Dst rows 128..191: t0.F2 | t0.F3 | t1.F2 | t1.F3
+//   Dst rows 192..255: t2.F2 | t2.F3 | t3.F2 | t3.F3
 //
-// Math DEST layout (4 tiles, ct=4 FP16, mirrors fast_tilize):
-//   Dst rows   0..63:   t0.F0 || t0.F1 || t1.F0 || t1.F1 (4×16 rows)
-//   Dst rows  64..127:  t2.F0 || t2.F1 || t3.F0 || t3.F1
-//   Dst rows 128..191:  t0.F2 || t0.F3 || t1.F2 || t1.F3
-//   Dst rows 192..255:  t2.F2 || t2.F3 || t3.F2 || t3.F3
+// Each PACR: ALL_INTF_ACTIVE + STRIDED_MODE → 4 interfaces read 4 face-rows
+// at Dst rows R, R+16, R+32, R+48 (the 16-row interface stride), concatenated
+// into 64 contiguous L1 datums.
 //
-// Pack output (RM strip, 32 rows × 128 datums = 4096 datums = 4 tile-sizes):
-//   L1 row 0 cols 0..63: PACR_0 (pack_row=0,  4-intf STRIDED) reads
-//                        t0.F0[0], t0.F1[0], t1.F0[0], t1.F1[0] → concat 64 datums
-//   L1 row 0 cols 64..127: PACR_1 (pack_row=64) reads
-//                        t2.F0[0], t2.F1[0], t3.F0[0], t3.F1[0] → concat 64 datums
-//   L1 row 1 cols 0..63: PACR_2 (pack_row=1) ... etc.
+// PACR sequence (64 PACRs total per block_ct_dim=4 call):
+//   Phase 1 (top 16 strip rows):
+//     PACR pair p=0..15: pack_row=p (block 0) + pack_row=p+64 (block 1)
+//   Phase 2 (bottom 16 strip rows):
+//     PACR pair p=0..15: pack_row=p+128 (block 2) + pack_row=p+192 (block 3)
 //
-// Total: 64 PACRs per 4-tile call. L1 written naturally contiguous via
-// PACR's internal datum advance — no per-tile L1_Dest_addr update needed.
+// L1 writes are contiguous via PACR's internal datum counter — no per-PACR
+// L1_Dest_addr cfg update needed. Single L1 cfg slot (SEC0_REG1).
 //
-// DOMAIN RESTRICTION: block_ct_dim=4 only (matches fast_tilize math output).
-// Wider blocks would need either multiple calls or a larger math output.
+// ADC strides (units: bytes; src_addr = Σ ch0.X*x + Y*y + Z*z + W*w divided
+// by datum size to give datum offset; pack_row = datum_offset / FACE_C_DIM):
+//   x_stride = bpe                  (per-datum)
+//   y_stride = FACE_C_DIM * bpe     (1 face-row = 16 datums per y+=1)
+//   z_stride = 64 * y_stride        (1 block of 64 face-rows per z+=1)
+//   w_stride = 2 * z_stride         (1 phase = 128 face-rows per w+=1)
+//
+// AddrMod scheme:
+//   ADDR_MOD_0: z_src.incr=1                       (post-PACR_pair_0: go to second block)
+//   ADDR_MOD_1: y_src.incr=1, z_src.clr=1          (post-PACR_pair_1: advance row, reset block)
+//
+// Two MOP runs per call (phase 1 and phase 2). Between them: INCADCZW W+=1
+// (jump to bottom-half blocks) + SETADCXY reset y/z.
+//
+// DOMAIN: block_ct_dim=4, num_faces=4, FP16 / bf16 output (matches
+// fast_tilize math output size). Other shapes fall back to legacy
+// `_llk_pack_untilize_` (T2+T3 wins still apply).
 
 #pragma once
 
@@ -35,42 +50,86 @@
 namespace ckernel
 {
 
-// AddrMod plan (provisional — needs silicon validation):
-//   ADDR_MOD_0: y_src.incr=1            (advance Dst row within a 16-row block)
-//   ADDR_MOD_1: y_src={clr=1,cr=1}      (close top-half: reset row, ready for bottom-half)
-//   ADDR_MOD_2: TBD — face-pair boundary (F0/F1 group → F2/F3 group, jump z)
-//   ADDR_MOD_3: TBD — block boundary (top-half → bottom-half quadrants)
 inline void _llk_pack_fast_untilize_configure_addrmod_()
 {
-    addr_mod_pack_t {.y_src = {.incr = 1}}.set(ADDR_MOD_0);
-    addr_mod_pack_t {.y_src = {.clr = 1, .cr = 1}, .z_src = {.clr = 1}}.set(ADDR_MOD_1);
-    // ADDR_MOD_2/3 placeholders — populate when MOP body is written.
-    addr_mod_pack_t {.y_src = {.incr = 1}}.set(ADDR_MOD_2);
-    addr_mod_pack_t {.y_src = {.incr = 1}}.set(ADDR_MOD_3);
+    // ADDR_MOD_0: after PACR reading block A, advance z to read block A+1.
+    addr_mod_pack_t {.z_src = {.incr = 1}}.set(ADDR_MOD_0);
+
+    // ADDR_MOD_1: after PACR reading block A+1, advance to next row in block A
+    // (y+=1) and reset z to 0 (back to block A).
+    addr_mod_pack_t {.y_src = {.incr = 1}, .z_src = {.clr = 1}}.set(ADDR_MOD_1);
 }
 
-// MOP body placeholder. Final structure (to validate on silicon):
-//   outer = face_r_dim (16 rows per face-row group)
-//   inner = 2 (top-half + bottom-half-of-row PACR pair)
-//   each PACR: ALL_INTF_ACTIVE + DST_ACCESS_STRIDED_MODE
-//   between outer iters: nothing (Dst row advance via AddrMod, L1 via PACR internal)
-//   between top-half and bottom-half phases: jump pack_row by 128 (Dst rows 0..127 → 128..255)
+// MOP body: 16 outer iterations × 2 inner PACRs.
+// Inner PACR pair: PACR(AM0) writes 64 datums from block A, then PACR(AM1, Last=1)
+// writes 64 datums from block A+1 and closes the row.
 //
-// This skeleton just builds; functional verification in T5.4.
-template <std::uint32_t block_ct_dim>
+// MOP runs once per phase (top/bottom). 2 phases × 16 × 2 = 64 PACRs total.
 inline void _llk_pack_fast_untilize_mop_config_()
 {
-    static_assert(block_ct_dim == 4, "T5-B fast untilize only supports block_ct_dim=4 (matches fast_tilize math output)");
-    // TODO: write MOP body.
+    constexpr std::uint32_t MOP_OUTER_LOOP = 16; // face_r_dim rows per phase
+    constexpr std::uint32_t MOP_INNER_LOOP = 2;  // 2 PACRs per row pair (block A + block A+1)
+
+    ckernel_template tmp(
+        MOP_OUTER_LOOP,
+        MOP_INNER_LOOP,
+        // loop_op0: PACR reading current block, then advance via ADDR_MOD_0 (z+=1)
+        TT_OP_PACR(
+            p_pacr::CFG_CTXT_0,
+            p_pacr::NO_ROW_PAD_ZERO,
+            p_pacr::DST_ACCESS_STRIDED_MODE,
+            ADDR_MOD_0,
+            p_pacr::ADDR_CNT_CTXT_0,
+            0,
+            p_pacr::ALL_INTF_ACTIVE,
+            0,
+            0,
+            p_pacr::NO_CTXT_CTRL,
+            0,
+            0),
+        // loop_op1: PACR reading next block, advance via ADDR_MOD_1 (y+=1, z=0)
+        TT_OP_PACR(
+            p_pacr::CFG_CTXT_0,
+            p_pacr::NO_ROW_PAD_ZERO,
+            p_pacr::DST_ACCESS_STRIDED_MODE,
+            ADDR_MOD_1,
+            p_pacr::ADDR_CNT_CTXT_0,
+            0,
+            p_pacr::ALL_INTF_ACTIVE,
+            0,
+            0,
+            p_pacr::NO_CTXT_CTRL,
+            0,
+            0));
+
+    // Last inner of last outer = last PACR of the phase. Mark Last=1 to flush.
+    std::uint32_t last_op = TT_OP_PACR(
+        p_pacr::CFG_CTXT_0,
+        p_pacr::NO_ROW_PAD_ZERO,
+        p_pacr::DST_ACCESS_STRIDED_MODE,
+        ADDR_MOD_1,
+        p_pacr::ADDR_CNT_CTXT_0,
+        0,
+        p_pacr::ALL_INTF_ACTIVE,
+        0,
+        0,
+        p_pacr::NO_CTXT_CTRL,
+        0,
+        1);
+    tmp.set_last_outer_loop_instr(last_op);
+
+    tmp.program();
 }
 
 template <DstSync Dst, bool is_fp32_dest_acc_en = false, std::uint32_t block_ct_dim = 4>
 inline void _llk_pack_fast_untilize_init_(const std::uint32_t pack_src_format, const std::uint32_t pack_dst_format, const std::uint32_t num_faces = 4)
 {
-    static_assert(block_ct_dim == 4, "T5-B fast untilize only supports block_ct_dim=4");
+    static_assert(block_ct_dim == 4, "T5-B fast untilize only supports block_ct_dim=4 (matches fast_tilize math output)");
 
     if constexpr (is_fp32_dest_acc_en)
     {
+        // Mirror fast_tilize init: reconfig pack_src to bf16-compat + Read_32b=0
+        // for stride-16 stepping through DEST.
         constexpr std::uint32_t compat_src = ckernel::to_underlying(DataFormat::Float16_b);
         const std::uint32_t tile_size      = SCALE_DATUM_SIZE(pack_dst_format, TILE_C_DIM * TILE_R_DIM);
         reconfig_packer_data_format<is_fp32_dest_acc_en>(compat_src, pack_dst_format, tile_size, FACE_R_DIM, TILE_C_DIM, num_faces, /*partial_face=*/false);
@@ -84,14 +143,17 @@ inline void _llk_pack_fast_untilize_init_(const std::uint32_t pack_src_format, c
 
     TTI_SETADCXX(p_setadc::PAC, FACE_C_DIM - 1, 0x0);
 
-    // Strides — same as fast_tilize for now (Dst-side input strides). Verify on silicon.
+    // Strides for our row/block/phase advance scheme.
     const std::uint32_t effective_src = is_fp32_dest_acc_en ? ckernel::to_underlying(DataFormat::Float16_b) : pack_src_format;
     const std::uint32_t x_stride      = (effective_src & 0x3) == ckernel::to_underlying(DataFormat::Float32)   ? 4
                                         : (effective_src & 0x3) == ckernel::to_underlying(DataFormat::Float16) ? 2
                                                                                                                : 1;
-    std::uint32_t y_stride            = 64 * FACE_C_DIM * x_stride;
-    std::uint32_t z_stride            = FACE_C_DIM * x_stride;
-    std::uint32_t w_stride            = 2 * FACE_C_DIM * x_stride;
+    // y_stride: 1 face-row of 16 datums per y+=1
+    const std::uint32_t y_stride = FACE_C_DIM * x_stride;
+    // z_stride: 64 face-rows per z+=1 (one block: 4 face-tile-groups of 16 rows)
+    const std::uint32_t z_stride = 64 * FACE_C_DIM * x_stride;
+    // w_stride: 2 blocks per w+=1 (one phase = 128 face-rows = top vs bottom half)
+    const std::uint32_t w_stride = 128 * FACE_C_DIM * x_stride;
 
     TT_SETDMAREG(0, LOWER_HALFWORD(y_stride << PCK0_ADDR_CTRL_XY_REG_0_Ystride_SHAMT), 0, LO_16(p_gpr_pack::TMP0));
     TT_SETDMAREG(0, UPPER_HALFWORD(y_stride << PCK0_ADDR_CTRL_XY_REG_0_Ystride_SHAMT), 0, HI_16(p_gpr_pack::TMP0));
@@ -102,17 +164,32 @@ inline void _llk_pack_fast_untilize_init_(const std::uint32_t pack_src_format, c
     TTI_WRCFG(p_gpr_pack::TMP1, p_cfg::WRCFG_32b, PCK0_ADDR_CTRL_ZW_REG_0_Zstride_ADDR32);
 
     _llk_pack_fast_untilize_configure_addrmod_();
-    _llk_pack_fast_untilize_mop_config_<block_ct_dim>();
+    _llk_pack_fast_untilize_mop_config_();
 }
 
+// One call processes one block of block_ct_dim=4 tiles.
+// Output: 4 tiles' worth of RM strip starting at `address` (in 16B units).
 template <std::uint32_t block_ct_dim = 4>
-inline void _llk_pack_fast_untilize_block_(const std::uint32_t tile_index, const std::uint32_t address, const std::uint32_t num_faces = 4)
+inline void _llk_pack_fast_untilize_block_(const std::uint32_t address, const std::uint32_t num_faces = 4)
 {
     static_assert(block_ct_dim == 4, "T5-B fast untilize only supports block_ct_dim=4");
-    TTI_SETADCXY(p_setadc::PAC, 0, 0, 0, 0, 0b0011);
+
     program_packer_destination(address);
+
+    // Reset all ADC counters to 0.
+    TTI_SETADCXY(p_setadc::PAC, 0, 0, 0, 0, 0b0011);
     TTI_SETADCZW(p_setadc::PAC, 0, 0, 0, 0, 0b0011);
-    // ckernel::ckernel_template::run();  // TODO: once MOP body is implemented
+
+    // Phase 1: top 16 strip rows (blocks 0 + 1 at Dst rows 0..127).
+    ckernel_template::run();
+
+    // Phase boundary: jump to bottom half via w+=1.
+    // After phase 1: y=16, z=0, w=0 → need y=0, z=0, w=1.
+    TTI_SETADCXY(p_setadc::PAC, 0, 0, 0, 0, 0b0011); // reset y
+    TTI_INCADCZW(p_setadc::PAC, 0, 0, 0, 1);         // w+=1 → jump 128 rows
+
+    // Phase 2: bottom 16 strip rows (blocks 2 + 3 at Dst rows 128..255).
+    ckernel_template::run();
 }
 
 template <DstSync Dst, bool is_fp32_dest_acc_en>
