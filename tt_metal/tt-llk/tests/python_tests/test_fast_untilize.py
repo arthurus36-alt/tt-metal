@@ -143,7 +143,7 @@ def test_fast_untilize(formats, dest_acc, dimensions, stimulus_kind):
         rows = range(14, 20)
         result_rows = {row: row_chunks(res_tensor, row) for row in rows}
         golden_rows = {row: row_chunks(golden_tensor, row) for row in rows}
-        assert False, (
+        pytest.fail(
             f"fast_untilize output mismatch at index {idx}: "
             f"result={res_tensor[idx].item()} golden={golden_tensor[idx].item()} "
             f"row0={row_chunks(res_tensor, 0)} row0_golden={row_chunks(golden_tensor, 0)} "
