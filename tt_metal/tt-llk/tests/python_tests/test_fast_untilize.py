@@ -4,19 +4,21 @@
 """
 Fast-untilize MVP test (T5-B / tt-metal#42048 + #42049).
 
-Pipeline: unpack (fast_tilize unpack) → math (fast_tilize math) → pack
-(NEW fast_untilize pack). Output: row-major strip.
+Pipeline: fast_untilize unpack -> dedicated fast_untilize math -> fast_untilize
+pack. Output: row-major strip.
 
-Hardcoded: block_ct_dim=4, num_faces=4, FP16/bf16.
-First-pass goal: silicon-validate the pack MOP. Functional PCC check.
+Hardcoded: unit_dim={4,2,3}, num_faces=4, FP16/bf16, SyncHalf.
+Focused goal: silicon-validate the fast-untilize LLK path against golden.
 """
+
+import struct
 
 import pytest
 import torch
 from helpers.chip_architecture import ChipArchitecture, get_chip_architecture
 from helpers.format_config import DataFormat
 from helpers.golden_generators import UntilizeGolden, get_golden_generator
-from helpers.llk_params import DestAccumulation, format_dict
+from helpers.llk_params import DestAccumulation, PerfRunType, format_dict
 from helpers.param_config import input_output_formats, parametrize
 from helpers.stimuli_config import StimuliConfig
 from helpers.stimuli_generator import generate_stimuli
@@ -24,26 +26,42 @@ from helpers.test_config import TestConfig
 from helpers.test_variant_parameters import (
     LOOP_FACTOR,
     NUM_FACES,
+    NUM_GUARD_TILES,
+    PERF_RUN_TYPE,
     TILE_COUNT,
     generate_input_dim,
 )
-from helpers.utils import passed_test
+from ttexalens.tt_exalens_lib import read_from_device
 
 TILE_R = 32
 TILE_C = 32
+FAST_UNTILIZE_DIMS = [
+    (rt_dim, ct_dim) for rt_dim in [1, 2, 4] for ct_dim in range(2, 9)
+]
+
+
+def generate_tile_face_row_ids(tile_count):
+    values = []
+    for tile in range(tile_count):
+        for face in range(4):
+            for row in range(16):
+                value = tile * 64 + face * 16 + row + 1
+                values.extend([value] * 16)
+    return torch.tensor(values, dtype=torch.bfloat16)
 
 
 @parametrize(
     formats=input_output_formats([DataFormat.Float16_b], same=True),
     dest_acc=[DestAccumulation.No],
-    dimensions=[(1, 4)],  # ct=4, rt=1 — only supported shape for T5 MVP
+    dimensions=FAST_UNTILIZE_DIMS,
+    stimulus_kind=["row_id", "random"],
 )
-def test_fast_untilize(formats, dest_acc, dimensions):
+def test_fast_untilize(formats, dest_acc, dimensions, stimulus_kind):
     if get_chip_architecture() != ChipArchitecture.BLACKHOLE:
         pytest.skip("BH only")
 
     input_height_tiles, input_width_tiles = dimensions
-    assert input_width_tiles == 4, "T5-B MVP only supports ct=4"
+    assert 2 <= input_width_tiles <= 8, "T5-B bring-up supports ct=2..8"
 
     input_dimensions = [input_height_tiles * TILE_R, input_width_tiles * TILE_C]
     tile_count = input_height_tiles * input_width_tiles
@@ -53,7 +71,10 @@ def test_fast_untilize(formats, dest_acc, dimensions):
         input_dimensions_A=input_dimensions,
         stimuli_format_B=formats.input_format,
         input_dimensions_B=input_dimensions,
+        sfpu=False,
     )
+    if stimulus_kind == "row_id":
+        src_A = generate_tile_face_row_ids(tile_count)
 
     generate_golden = get_golden_generator(UntilizeGolden)
     golden_tensor = generate_golden(src_A, formats.output_format, input_dimensions)
@@ -61,12 +82,15 @@ def test_fast_untilize(formats, dest_acc, dimensions):
     configuration = TestConfig(
         "sources/fast_untilize_test.cpp",
         formats,
-        templates=[],
-        runtimes=[
+        templates=[
             generate_input_dim(input_dimensions, input_dimensions),
+            PERF_RUN_TYPE(PerfRunType.L1_TO_L1),
+        ],
+        runtimes=[
             TILE_COUNT(tile_count),
             LOOP_FACTOR(1),
             NUM_FACES(4),
+            NUM_GUARD_TILES(0),
         ],
         variant_stimuli=StimuliConfig(
             src_A,
@@ -84,12 +108,102 @@ def test_fast_untilize(formats, dest_acc, dimensions):
 
     res_from_L1 = configuration.run().result
 
-    assert len(res_from_L1) == len(golden_tensor), (
-        f"Result length {len(res_from_L1)} != golden length {len(golden_tensor)}"
-    )
+    assert len(res_from_L1) == len(
+        golden_tensor
+    ), f"Result length {len(res_from_L1)} != golden length {len(golden_tensor)}"
 
     res_tensor = torch.tensor(res_from_L1, dtype=format_dict[formats.output_format])
 
-    assert passed_test(
-        golden_tensor, res_tensor, formats.output_format
-    ), "fast_untilize output does not match UntilizeGolden"
+    mismatches = torch.nonzero(res_tensor != golden_tensor, as_tuple=False).flatten()
+    if mismatches.numel() > 0:
+        idx = int(mismatches[0])
+        context_start = max(idx - 8, 0)
+        context_end = min(idx + 8, len(res_tensor))
+
+        def row_chunks(tensor, row):
+            row_start = row * input_dimensions[1]
+            return [
+                float(tensor[row_start + i].item())
+                for i in range(0, input_dimensions[1], 16)
+            ]
+
+        rows = range(14, 20)
+        result_rows = {row: row_chunks(res_tensor, row) for row in rows}
+        golden_rows = {row: row_chunks(golden_tensor, row) for row in rows}
+        assert False, (
+            f"fast_untilize output mismatch at index {idx}: "
+            f"result={res_tensor[idx].item()} golden={golden_tensor[idx].item()} "
+            f"row0={row_chunks(res_tensor, 0)} row0_golden={row_chunks(golden_tensor, 0)} "
+            f"result_rows={result_rows} golden_rows={golden_rows} "
+            f"result_context={res_tensor[context_start:context_end].tolist()} "
+            f"golden_context={golden_tensor[context_start:context_end].tolist()}"
+        )
+
+
+@parametrize(
+    formats=input_output_formats([DataFormat.Float16_b], same=True),
+    dest_acc=[DestAccumulation.No],
+    dimensions=FAST_UNTILIZE_DIMS,
+)
+def test_fast_untilize_overflow_guard(formats, dest_acc, dimensions):
+    if get_chip_architecture() != ChipArchitecture.BLACKHOLE:
+        pytest.skip("BH only")
+
+    input_height_tiles, input_width_tiles = dimensions
+    input_dimensions = [input_height_tiles * TILE_R, input_width_tiles * TILE_C]
+    tile_count = input_height_tiles * input_width_tiles
+    guard_tiles = 5
+
+    src_A, tile_cnt_A, src_B, tile_cnt_B = generate_stimuli(
+        stimuli_format_A=formats.input_format,
+        input_dimensions_A=input_dimensions,
+        stimuli_format_B=formats.input_format,
+        input_dimensions_B=input_dimensions,
+        const_face=True,
+        const_value_A=0.5,
+        sfpu=False,
+    )
+
+    configuration = TestConfig(
+        "sources/fast_untilize_test.cpp",
+        formats,
+        templates=[
+            generate_input_dim(input_dimensions, input_dimensions),
+            PERF_RUN_TYPE(PerfRunType.L1_TO_L1),
+        ],
+        runtimes=[
+            TILE_COUNT(tile_count),
+            LOOP_FACTOR(1),
+            NUM_FACES(4),
+            NUM_GUARD_TILES(guard_tiles),
+        ],
+        variant_stimuli=StimuliConfig(
+            src_A,
+            formats.input_format,
+            src_B,
+            formats.input_format,
+            formats.output_format,
+            tile_count_A=tile_cnt_A,
+            tile_count_B=tile_cnt_B,
+            tile_count_res=tile_count + guard_tiles,
+            sfpu=False,
+        ),
+        dest_acc=dest_acc,
+        compile_time_formats=True,
+    )
+
+    configuration.run().result
+
+    stim = configuration.variant_stimuli
+    last_guard_addr = (
+        stim.buf_res_addr + (tile_count + guard_tiles - 1) * stim.buf_res_tile_size
+    )
+    raw = read_from_device("0,0", last_guard_addr, num_bytes=10)
+    marker = struct.unpack_from("<H", raw, 0)[0]
+    assert marker == 0x4680, f"Sentinel marker missing; got 0x{marker:04x}"
+
+    for g in range(guard_tiles - 1):
+        corrupted = struct.unpack_from("<H", raw, (g + 1) * 2)[0]
+        assert (
+            corrupted == 0
+        ), f"L1 overflow: Guard[{g}] has {corrupted} corrupted uint16 words (dims={dimensions})"

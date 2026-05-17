@@ -384,9 +384,211 @@ After patches, sim runs but hits **`TENSIX TIMED OUT … BRISC firmware did not 
 
 Saving the two patches as a starting checkpoint for future-session ttsim debug. T5 iteration via sim still possible after BRISC boot issue is resolved.
 
+**Update after G5.1 debug:** local `ttsim-private` was patched far enough for focused fast-untilize bring-up:
+- BH TLB cfg writes now accept the 8-byte tt-umd path.
+- `SCRATCH_SEC2`, CFG reg 211 writes, and the relevant CFGSHIFTMASK scratch selector were modeled.
+- A focused fast-untilize case runs and passes under ttsim, but it does **not** reproduce the silicon pack hang. Use ttsim for basic functional coverage, not for this class of MOP/replay liveness bug.
+
+**T5.3e session 5 (2026-05-16): dedicated math layout + focused silicon PASS**
+
+Implemented dedicated experimental unpack/math paths:
+- Added `experimental/llk_unpack_fast_untilize.h`.
+- Added `experimental/llk_math_fast_untilize.h`.
+- Switched the test source from fast_tilize unpack/math to fast_untilize unpack plus the new fast_untilize math.
+- The unpacker presents faces to math as `F2,F3,F0,F1`; math now remaps them into the row-major strip Dst layout required by the 4-interface packer.
+- The physical Dst layout places `F0/F1` in rows `0..127` and `F2/F3` in rows `128..255`.
+- First unpack-side experiment removed the standard `unpack_A` zero SrcB sideband. Accuracy still passed, but unpack perf did not move by itself. The real unpack win came from consuming the four contiguous input tiles as one 16-face block with one context/address setup.
+
+Pack-side fixes:
+- `ckernel_template` with two loop ops already emits both PACRs per inner iteration, so `MOP_INNER_LOOP` is `1`, not `2`.
+- Phase sequencing on BH silicon is one contiguous L1 stream. Program `L1_Dest_addr` once at the base, emit top rows first with `Last=0`, then emit bottom rows with `Last=1`.
+- Direct W/Z counter phase selection did not latch reliably in this MOP. The original passing path reprogrammed `DEST_TARGET_REG_CFG_PACK` through `select_packer_dest_registers<DstSync::SyncFull>()`: offset `128` for the top half, then offset `0` for the bottom half while the L1 stream remained open.
+- Follow-up: phase selection is now `SyncHalf`-native. The pack path programs both lower/upper DEST offset GPRs for each phase (`active_half + 128`, then `active_half + 0`) and lets `select_packer_dest_registers<DstSync::SyncHalf>()` select the current half. `SyncFull` is no longer the bring-up crutch.
+- Header-only LLK changes can reuse stale `/tmp/tt-llk-build` ELFs; validation was rerun after clearing that generated build directory.
+
+Validation:
+```bash
+cd tt_metal/tt-llk/tests
+rm -rf /tmp/tt-llk-build
+COMPILED=1 RUN_TEST=0 FILE_NAME=test_fast_untilize.py QUIET=1 PARALLEL_JOBS=4 ../.claude/scripts/run_test.sh
+COMPILED=0 RUN_TEST=1 FILE_NAME=test_fast_untilize.py QUIET=1 ../.claude/scripts/run_test.sh
+```
+Result: `test_fast_untilize.py` passes twice for the focused BH ct=4 Float16_b -> Float16_b MVP case.
+
+Focused perf check for the same working case (`rt=1`, `ct=4`, `Float16_b -> Float16_b`, `loop_factor=1`):
+- Added `tests/python_tests/perf_fast_untilize.py` for single-case L1_TO_L1 + per-thread isolate measurements.
+- Fast path: TILE_LOOP L1_TO_L1 = `82.25 cyc/tile`, PACK_ISOLATE = `58.25 cyc/tile`.
+- Existing `perf_pack_untilize.py` baseline, same parameter: TILE_LOOP L1_TO_L1 = `160.0 cyc/tile`, PACK_ISOLATE = `109.75 cyc/tile`.
+- Narrow-case improvement: L1_TO_L1 `-48.59%` (`1.95x`), PACK_ISOLATE `-46.92%` (`1.88x`).
+- This clears the one-case >=30% L1_TO_L1 target, but does not replace the full perf sweep / regression gate.
+
+Per-thread fast-path isolate check (`perf_fast_untilize.py`, same shape):
+
+| loop_factor | L1_TO_L1 | UNPACK_ISOLATE | MATH_ISOLATE | PACK_ISOLATE |
+|---:|---:|---:|---:|---:|
+| 1 | 82.25 | 44.25 | 77.50 | 58.25 |
+| 4 | 48.00 | 23.25 | 31.5625 | 35.25 |
+| 16 | 40.875 | 17.8125 | 20.078125 | 29.4375 |
+
+Conclusion from the focused steady-state case: the 16-face block unpack removed the previous unpack bottleneck (`UNPACK_ISOLATE` `55.14 -> 17.81 cyc/tile`, `L1_TO_L1` `57.34 -> 40.875 cyc/tile` at loop_factor=16). Pack is now the largest isolate component (`29.44 cyc/tile`) and the remaining full-pipeline gap is synchronization/overlap plus pack.
+
+**T5.4 generalization plan (steal what maps from BH fast_tilize)**
+
+Current focused fast path contract:
+- BH only.
+- Source-level row loop for `rt>=1`; the LLK unit remains one tile row chunk.
+- Row widths decompose into `unit_dim={4,2,3}`; `ct=1` remains legacy fallback for integration.
+- Focused bring-up currently validates `ct=2..8`, `num_faces=4`.
+- `Float16_b -> Float16_b`, `dest_acc=No`.
+- Each unit's input tiles are contiguous in L1 and are consumed as a compact SrcA face stream.
+- Whole-row units (`ct=2/3/4`) use the contiguous pack stream. Wider rows use the row-strided pack MOP per chunk.
+
+Fast-tilize ideas worth reusing:
+- Row-only kernel contract first; outer caller loops rows.
+- `decompose_row(ct_dim)` into unit chunks, with width-1 fallback and `4+1 -> 2+3` style tail handling.
+- Initialize for the first unit dimension and only reinit when the next unit changes.
+- Split APIs into row/chunk lifecycle (`row_begin`, `row_chunk`, `row_end`) rather than one monolithic block.
+- Keep experimental path gated and preserve legacy fallback from day one.
+- Copy the accuracy/perf matrix shape from `test_fast_tilize_full.py` and `perf_fast_tilize_full.py`, but stage it instead of enabling the full matrix at once.
+
+Important difference from fast_tilize:
+- Fast_tilize writes tilized output, so chunks can be streamed as independent contiguous tile groups.
+- Untilize writes row-major output. For `ct>4`, chunk 0 row 0 must be followed by chunk 1 row 0, not by chunk 0 row 1. Therefore a naive loop over contiguous 4-tile chunks produces chunk-major output, not row-major output.
+- General `ct>4` requires pack-side row-strided L1 addressing or per-row destination updates. The MVP avoided this only because `ct=4` made the whole row equal one chunk.
+
+Milestone G1 - cleanup current MVP into reusable primitives:
+- Rename comments and APIs around the current 4-tile unit, not the one-off test.
+- Unpack: keep one-context 16-face block for unit_dim=4.
+- Math: keep a unit_dim=4 layout primitive that maps four contiguous tiles into the packer layout.
+- Pack: split into `row_begin(base)`, `row_chunk_4(last=false/true)`, `row_end()` or equivalent so later `rt`/`ct` loops do not duplicate setup.
+- Keep focused accuracy + perf tests green after API cleanup.
+
+Milestone G2 - row-by-row `rt` handling, still `ct=4`:
+- Do not build a multi-row primitive. Match fast_tilize: the fast LLK unit is row-only and the caller/source loops rows.
+- This is the safest next test because each tile row is still exactly one 4-tile row-major strip.
+- For row `r`, input base is `buffer_A[r * 4]`; output base is `buffer_Res[r * 4]`.
+- Reuse the same unpack/math/pack unit once per row.
+- Add accuracy for `(rt, ct) = (2,4), (4,4), (8,4)` only to validate caller row iteration and address arithmetic.
+- Add perf for `rt=1/4/8, ct=4`; expect per-row setup amortization behavior to be visible, but do not treat this as a separate kernel capability.
+
+G2 implementation checkpoint:
+- Unpack/math/pack now loop over `FULL_RT_DIM` at the source level; the LLK unit remains row/chunk-scoped.
+- Accuracy passes for `(rt, ct) = (1,4), (1,8), (2,4), (4,4), (2,8)`.
+- Focused `ct=4, rt=4` perf passes and reaches `37.16 cyc/tile` L1_TO_L1 at loop_factor=16.
+
+Milestone G3 - format gating:
+- Keep `dest_acc=No` fast path. `fp32_dest_acc` remains fallback because MOVA2D/Dst32 is unsafe in this family of paths.
+- First expand same-format 16-bit/BFP outputs that use 16-bit Dst view: `Float16_b -> Float16_b`, then `Float16_b -> Bfp8_b/Bfp4_b` if pack conversion behaves.
+- Treat `Float32 -> Float16_b/Bfp8_b/Bfp4_b` like fast_tilize: unpack converts to bf16-compatible SrcA, precision expectations must be explicit.
+- Leave `Float32 -> Float32`, Int formats, `num_faces != 4`, and width-1 on legacy path until proven.
+
+Milestone G4 - `ct>4` design spike:
+- Do not simply loop chunked MVP calls; that is the wrong output order.
+- **Design-gate decision:** use a second fast-pack MOP that mirrors legacy `llk_pack_untilize` row-close semantics, not fast_tilize's contiguous tile stream.
+  - Keep the existing contiguous MVP path for `full_ct_dim == block_ct_dim == 4`; it is the fastest case because the 4-tile chunk is the whole row.
+  - For `full_ct_dim > block_ct_dim`, each chunk call starts at:
+    `tile_row_base + chunk_col * TILE_C_DIM * bytes_per_datum / 16`.
+  - Store one element-row stride in scratch:
+    `element_row_stride_16B = full_ct_dim * TILE_C_DIM * bytes_per_datum / 16`.
+  - In the strided MOP, each strip row emits the chunk with the final PACR's `Last=1`, then the end-op does
+    `THCON_SEC0_REG1_L1_Dest_addr += element_row_stride_16B` via `CFGSHIFTMASK`.
+  - Because `Last=1` closes the row stream, the increment is the **full row stride**, not `row_stride - chunk_width`. This is the same contract as legacy `llk_pack_untilize`, where the caller offsets the block column and the MOP advances by full rows.
+  - Top phase starts at output row 0. After 16 row closes, the L1 destination is already at row 16 for the bottom phase; switch only the DEST source offset (`128 -> 0`) and rerun the same row-strided MOP.
+  - For tile row `rt`, the caller/source-level loop sets:
+    `tile_row_base = output_base + rt * TILE_R_DIM * element_row_stride_16B`.
+  - This supersedes the older BH four-L1-slot sketch for the fast path. On BH, ALL_INTF_ACTIVE concatenates the four read interfaces into one L1 stream behind `THCON_SEC0_REG1`; the correct scatter dimension is per-row cfg update, not multiple L1 destination slots.
+- Bring-up rule: `SyncHalf` is the default path. Phase selection must always be relative to the active DEST half (`active_half + 128`, then `active_half + 0`); do not use `SyncFull` as the generalization crutch.
+- Validation target: `(rt=1, ct=8)` accuracy first with two 4-tile chunks, then perf vs `perf_pack_untilize.py`.
+
+G4 implementation checkpoint:
+- Added the row-strided fast-pack MOP and wired `ct=8` as two 4-tile `SyncHalf` chunks.
+- Accuracy passes for `(rt, ct) = (1,4), (1,8), (2,4), (4,4), (2,8)` with deterministic row-id stimuli.
+- Focused perf now covers `ct=4` loop factors `1/4/16` and `ct=8` loop factors `1/4`. `ct=8, loop_factor=16` currently times out in the combined perf bring-up and is explicitly skipped until isolated.
+
+Milestone G5 - row-width units and tails:
+- Target the same high-level row decomposition policy as fast_tilize: support units `4`, `3`, and `2`; fallback to regular for width `1`; rewrite `4+1` tails as `2+3`.
+- For untilize, only enable that decomposition after row-strided pack output is correct. The output ordering constraint is stricter than fast_tilize.
+- `ct % 4 == 0`: fast path all 4-tile units.
+- `ct % 4 == 2`: implement a 2-tile unit; likely uses fewer active packer interfaces or a masked/partial PACR sequence.
+- `ct % 4 == 3`: implement a 3-tile unit after 2-tile is proven; likely needs explicit partial output handling because ALL_INTF_ACTIVE naturally emits 4 face-rows.
+- `ct == 1`: legacy fallback, matching fast_tilize's width-1 fallback.
+
+G5 implementation checkpoint:
+- Added row decomposition matching BH fast_tilize: `4` chunks, `2`/`3` tails, and `4+1 -> 2+3`.
+- Unpack now reprograms its face-stream MOP for `unit_dim=2/3/4`. Important fix: the source-level loop tracks the persistent hardware MOP unit across `LOOP_FACTOR`; resetting the software tracker each loop made decomposed rows run the wrong first-unit MOP and hang in `UNPACK_ISOLATE`.
+- Math now copies only the occupied tile bands into the fast-untilize dirty DEST layout.
+- Pack now has contiguous and row-strided `unit_dim=2/3/4` MOPs. Unit 2 uses one all-interface PACR per strip row; unit 3 uses an all-interface PACR plus a two-interface tail PACR.
+- Accuracy passes all 63 cases over `ct=2..8`, `rt=1/2/4`: deterministic row-ID, random-data, and pack-thread guard-sentinel coverage after the result buffer.
+- Focused perf passes all 63 cases over `ct=2..8`, `rt=1/2/4`, `loop_factor=1/4/16`. Wide rows now run through the stable direct pack fallback for all covered `rt`.
+- Latest TILE_LOOP steady-state highlights:
+
+| rt | ct | loop_factor | L1_TO_L1 | UNPACK_ISOLATE | MATH_ISOLATE | PACK_ISOLATE |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 2 | 16 | 67.28 | 27.44 | 23.63 | 52.81 |
+| 1 | 3 | 16 | 50.58 | 18.69 | 21.02 | 41.52 |
+| 1 | 4 | 16 | 38.28 | 17.91 | 19.81 | 31.11 |
+| 1 | 5 | 16 | 81.11 | 33.25 | 19.16 | 72.33 |
+| 1 | 6 | 16 | 67.05 | 27.58 | 18.62 | 59.95 |
+| 1 | 7 | 16 | 63.58 | 23.75 | 18.26 | 56.93 |
+| 1 | 8 | 16 | 53.19 | 17.19 | 17.99 | 47.73 |
+| 4 | 4 | 16 | 37.15 | 16.49 | 17.18 | 30.32 |
+| 4 | 5 | 16 | 80.34 | 32.71 | 17.15 | 70.39 |
+| 4 | 6 | 16 | 66.17 | 27.21 | 16.94 | 58.52 |
+| 4 | 7 | 16 | 63.08 | 23.36 | 16.81 | 56.33 |
+| 4 | 8 | 16 | 52.76 | 16.30 | 16.71 | 46.97 |
+
+Apples-to-apples legacy comparison (`perf_fast_untilize_legacy_compare.py`, same format/dims/loop factors, `L1_TO_L1` + `PACK_ISOLATE`) passes 63 cases. Fast path is faster than legacy on **all 63 L1_TO_L1 points**. PACK_ISOLATE is faster on 62/63 points; the only pack-isolate regression is cold/small `rt=1, ct=5, loop_factor=1` (`107.6` vs legacy `102.4`), while full L1_TO_L1 still wins (`126.4` vs legacy `152.2`).
+
+Steady-state (`loop_factor=16`) L1_TO_L1 comparison:
+
+| rt | ct | legacy | fast | delta |
+|---:|---:|---:|---:|---:|
+| 1 | 2 | 135.31 | 67.25 | -50.3% |
+| 1 | 3 | 112.67 | 50.53 | -55.1% |
+| 1 | 4 | 100.98 | 38.28 | -62.1% |
+| 1 | 5 | 94.36 | 81.11 | -14.0% |
+| 1 | 6 | 89.48 | 67.05 | -25.1% |
+| 1 | 7 | 86.26 | 63.58 | -26.3% |
+| 1 | 8 | 83.83 | 53.19 | -36.6% |
+| 2 | 2 | 132.48 | 75.14 | -43.3% |
+| 2 | 3 | 110.27 | 56.95 | -48.4% |
+| 2 | 4 | 99.07 | 34.63 | -65.0% |
+| 2 | 5 | 92.16 | 80.92 | -12.2% |
+| 2 | 6 | 87.67 | 66.78 | -23.8% |
+| 2 | 7 | 84.46 | 63.50 | -24.8% |
+| 2 | 8 | 82.14 | 53.12 | -35.3% |
+| 4 | 2 | 131.03 | 71.63 | -45.3% |
+| 4 | 3 | 109.10 | 54.35 | -50.2% |
+| 4 | 4 | 97.87 | 37.16 | -62.0% |
+| 4 | 5 | 91.28 | 80.35 | -12.0% |
+| 4 | 6 | 86.79 | 66.17 | -23.8% |
+| 4 | 7 | 83.61 | 63.08 | -24.6% |
+| 4 | 8 | 81.36 | 52.76 | -35.1% |
+
+G5.1 wide-row long-loop debug:
+- Isolated the original `ct>4`, `loop_factor>=12` timeout to the pack thread. `UNPACK_ISOLATE` and `MATH_ISOLATE` passed for `ct=5/8`, `loop_factor=12/16`; `PACK_ISOLATE` timed out and full `L1_TO_L1` wedged behind packer backpressure.
+- Silicon boundary on the focused harness: `ct=5`, `loop_factor=8/9` passed; `ct=5`, `loop_factor=10` failed. That is 18 strided chunks passing and 20 strided chunks failing.
+- tt-exalens was useful where ttsim was not. At timeout, unpack/math had completed, pack had not; `trisc2_pc` landed in `ckernel::mop_sync()` / `store_blocking`, while pack debug bus state showed the packer datapath idle (`packer_busy=0`, `rwc_tdma_pack_busy=0`, pack request FIFO empty). This points at a MOP/replay sync liveness problem, not an active packer data-path stall.
+- Negative probes that did not move the failure: start/end/mid-phase `mop_sync` placement, final `TTI_STALLWAIT(PACK|THCON)`, row-close `Flush=1`, pack reinit at loop boundaries, closing only the final row of each phase, disabling the replay-buffer row-address `CFGSHIFTMASK`, `Concat=1` changes on non-final/partial rows, and direct phase wait rearrangements.
+- Fix: replace the wide-row strided MOP/replay body with a direct per-row RISC sequence of PACR(s) plus `CFGSHIFTMASK`. This bypasses the silicon `mop_sync` failure mode and restores correctness for `ct=5/8`, `loop_factor=16`.
+- Tradeoff: wide rows are now stable but pack-limited. `ct=5`, `loop_factor=16` is `81.11 cyc/tile` L1_TO_L1 and `72.33 cyc/tile` PACK_ISOLATE; `ct=8`, `loop_factor=16` is `53.19 cyc/tile` L1_TO_L1 and `47.73 cyc/tile` PACK_ISOLATE. The contiguous `ct<=4` path remains the performance target (`ct=4`, `loop_factor=16` is `38.28 cyc/tile` L1_TO_L1, `31.11 cyc/tile` PACK_ISOLATE).
+- Working conclusion: integration should include the direct wide-row path under the same narrow BH/format/dest gate for `ct=5..8`, because the apples-to-apples silicon comparison now confirms full-pipeline L1_TO_L1 wins for every covered wide shape. It is not the final wide-row performance ceiling, but it is shippable as a faster fallback within this gate.
+
+Milestone G6 - integration into real `pack_untilize`:
+- Add a template/runtime gate, e.g. `DestLayout::DirtyForUntilize` or `FAST_PACK_UNTILIZE_BH`, with legacy fallback.
+- First select the fast MOP path when all constraints are met: BH, 16-bit Dst view, `dest_acc=No`, `num_faces=4`, safe output format, and `full_ct_dim>=2`. Use the contiguous MOP for `ct<=4` and the direct row fallback for wider decomposed rows. Keep `ct=1` on legacy.
+- Keep `test_fast_untilize.py` as the bring-up oracle, then add/extend `test_zzz_pack_untilize.py` coverage for the integrated path.
+
+Milestone G7 - validation gates:
+- Accuracy: deterministic row-ID stimuli, random stimuli, guard tile overflow, `rt>1`, supported format matrix, and legacy fallback cases. Current bring-up covers row-ID + random + guard sentinels for `ct=2..8`, `rt=1/2/4`; format expansion remains.
+- Perf: `perf_fast_untilize.py` per-thread isolates, selected apples-to-apples `perf_pack_untilize.py` comparisons, then full sweep.
+- Integration: DeepSeek SDPA smoke only after full sweep has no correctness regressions and per-variant perf gating is in place.
+
 ### Task 5 — `dirty tile layout` in Dst + 4 packer interfaces (#42048 + #42049) (originally 8 days, now larger)
 
 **Gap:** G1, G2, G6.
+
+**Historical/superseded sketch:** the original multi-L1-slot untilize sketch below is kept for context, but the current BH design gate supersedes it. BH ALL_INTF_ACTIVE concatenates all read interfaces into one L1 stream behind `THCON_SEC0_REG1`; wide-row scatter is handled by row-address cfg updates, not four L1 destination slots.
 
 **Existing precedent on BH silicon: `fast_tilize`** (in `tt_metal/tt-llk/tt_llk_blackhole/llk_lib/experimental/`). It already implements three of the four pieces Task 5 needs and runs on silicon. **Read these first before writing code:**
 - `experimental/llk_pack_fast_tilize.h` — `ALL_INTF_ACTIVE` PACRs with `DST_ACCESS_STRIDED_MODE` (lines 35-87, `EMIT_FACE_PACRS`); 4 AddrMod slots (lines 27-33); tile-granularity address advance in MOP `set_end_ops` (lines 101-104) — not per-row
@@ -505,7 +707,7 @@ Pre-stage next iter's config in inactive bank while current iter is packing. Eli
 | T2 CFGSHIFTMASK pack | #42050 | **done** (76452552f02) | 3d | -26.7% L1_TO_L1 mean (max -47.5%) |
 | T3 AddrMod | #42051 | **done** (0a16daf4b4b) | 4d | -5.2% on top of T2 (cumulative -30.2%) |
 | T4 Ch1 counters | #42052 | **attempted, reverted** | 3d | BH applies WH-style 16B-mask → broken for <256B strides |
-| T5 4-intf + dirty dest | #42048 + #42049 | **WIP — compiles+runs, PCC fails first attempt** (branch pjosipovic/bh-untilize-t5) | 12-15d | 30-50% (structural, requires math co-design) |
+| T5 4-intf + dirty dest | #42048 + #42049 | **bring-up accuracy + perf pass** (branch pjosipovic/bh-untilize-t5; ct=2..8, rt coverage staged) | 12-15d | 30-50% (structural, requires math co-design) |
 | T6 Unpack | (no issue yet) | **attempted, deferred** | 3d | 5-10% (separate branch) |
 | T7 DeepSeek integ smoke | — | not started | 1d | verify |
 | T8 Bank ping-pong | (no issue yet) | deferred | — | 2-5% |
