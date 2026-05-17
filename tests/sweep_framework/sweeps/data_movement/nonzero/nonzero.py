@@ -43,10 +43,8 @@ parameters = {
 
 
 def invalidate_vector(test_vector) -> Tuple[bool, Optional[str]]:
-    if test_vector["input_layout"] == ttnn.TILE_LAYOUT:
-        return True, "Input tensor must be in row major layout"
-    if test_vector["input_layout"] == ttnn.ROW_MAJOR_LAYOUT and test_vector["input_a_dtype"] == ttnn.bfloat8_b:
-        return True, "bfloat8_b is only supported on tiled layout"
+    if test_vector["input_a_dtype"] == ttnn.bfloat8_b:
+        return True, "bfloat8_b is not supported for non_zero_indices"
     return False, None
 
 

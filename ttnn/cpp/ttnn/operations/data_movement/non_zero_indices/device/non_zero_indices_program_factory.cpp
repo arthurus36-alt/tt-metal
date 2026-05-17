@@ -12,8 +12,6 @@ using namespace tt::tt_metal;
 
 namespace ttnn::prim {
 
-<<<<<<< Updated upstream
-=======
 namespace {
 
 constexpr uint32_t TILE_H = 32;
@@ -51,7 +49,8 @@ uint32_t compute_geometry(
         // For WIDTH/BLOCK_SHARDED, TensorAccessor visits pages bank-by-bank, which differs from
         // logical row-major order. The kernel needs these three values to reconstruct flat_start.
         const uint32_t logical_last_dim = lshape[3];
-        const uint32_t grid_w = (elements_per_page < logical_last_dim) ? (logical_last_dim / elements_per_page) : 1;
+        const uint32_t grid_w =
+            (elements_per_page < logical_last_dim) ? (logical_last_dim / elements_per_page) : 1;
         uint32_t pages_per_bank = 1;
         const auto mem_layout = input.memory_config().memory_layout();
         if (mem_layout == TensorMemoryLayout::WIDTH_SHARDED || mem_layout == TensorMemoryLayout::BLOCK_SHARDED) {
@@ -99,7 +98,6 @@ uint32_t compute_geometry(
 
 }  // namespace
 
->>>>>>> Stashed changes
 NonZeroIndicesProgramFactory::cached_program_t NonZeroIndicesProgramFactory::create(
     const NonzeroParams& /*operation_attributes*/, const NonzeroInputs& tensor_args, NonzeroResult& output_tensors) {
     const auto& input = tensor_args.input;
@@ -108,60 +106,54 @@ NonZeroIndicesProgramFactory::cached_program_t NonZeroIndicesProgramFactory::cre
 
     tt::tt_metal::Program program{};
 
-    uint32_t alignment_base = 32 / input.element_size();
-    // we want per core to be aligned to aligment_base per core
+    const bool is_tile = (input.layout() == Layout::TILE);
 
-    uint32_t aligned_elements = tt::div_up(input.padded_shape()[-1], alignment_base) * alignment_base;
-    uint32_t actual_elements = input.padded_shape()[-1];
+    std::vector<uint32_t> runtime_args;
+    uint32_t aligned_output_bytes = 0;
+    const uint32_t input_page_size =
+        compute_geometry(input, out_num_indices, out_indices, runtime_args, aligned_output_bytes);
 
     CoreCoord core = {0, 0};
 
-    uint32_t input_cb_index = 0;
-    uint32_t output_cb_index_0 = 1;
-    uint32_t output_cb_index_1 = 2;
+    constexpr uint32_t input_cb_index = 0;
+    constexpr uint32_t output_cb_index_0 = 1;
+    constexpr uint32_t output_cb_index_1 = 2;
 
     tt::DataFormat input_cb_data_format = tt::tt_metal::datatype_to_dataformat_converter(input.dtype());
     tt::DataFormat output_cb_data_format = tt::tt_metal::datatype_to_dataformat_converter(DataType::UINT32);
 
-    uint32_t page_size = actual_elements * input.element_size();
-    uint32_t rounded_page_size = round_up_to_mul32(page_size);
+    // Input CB: single-buffered (barrier is issued after each read, no overlap benefit from double-buffering)
     tt::tt_metal::CircularBufferConfig cb_src0_config =
-        tt::tt_metal::CircularBufferConfig(2 * rounded_page_size, {{input_cb_index, input_cb_data_format}})
-            .set_page_size(input_cb_index, rounded_page_size);
+        tt::tt_metal::CircularBufferConfig(input_page_size, {{input_cb_index, input_cb_data_format}})
+            .set_page_size(input_cb_index, input_page_size);
     tt::tt_metal::CreateCircularBuffer(program, core, cb_src0_config);
 
+    // Output CB 0: count tensor (32 bytes fixed)
     tt::tt_metal::CircularBufferConfig cb_dst0_config =
         tt::tt_metal::CircularBufferConfig(2 * 32, {{output_cb_index_0, output_cb_data_format}})
             .set_page_size(output_cb_index_0, 32);
     tt::tt_metal::CreateCircularBuffer(program, core, cb_dst0_config);
 
-    uint32_t dst_page_size = actual_elements * 4;
-    uint32_t dst_rounded_page_size = round_up_to_mul32(dst_page_size);
+    // Output CB 1: indices tensor, one page holding all indices (worst case: all elements non-zero)
     tt::tt_metal::CircularBufferConfig cb_dst1_config =
-        tt::tt_metal::CircularBufferConfig(2 * dst_rounded_page_size, {{output_cb_index_1, output_cb_data_format}})
-            .set_page_size(output_cb_index_1, dst_rounded_page_size);
+        tt::tt_metal::CircularBufferConfig(2 * aligned_output_bytes, {{output_cb_index_1, output_cb_data_format}})
+            .set_page_size(output_cb_index_1, aligned_output_bytes);
     tt::tt_metal::CreateCircularBuffer(program, core, cb_dst1_config);
 
     std::map<std::string, std::string> defines;
     defines["NUM_BYTES"] = std::to_string(input.element_size());
+    if (is_tile) {
+        defines["INPUT_IS_TILE"] = "1";
+    }
 
-    // Create Kernel
     std::vector<uint32_t> compile_time_args = {
-        (std::uint32_t)input_cb_index,
-        (std::uint32_t)output_cb_index_0,
-        (std::uint32_t)output_cb_index_1,
+        static_cast<uint32_t>(input_cb_index),
+        static_cast<uint32_t>(output_cb_index_0),
+        static_cast<uint32_t>(output_cb_index_1),
     };
     TensorAccessorArgs(*input.buffer()).append_to(compile_time_args);
     TensorAccessorArgs(*out_num_indices.buffer()).append_to(compile_time_args);
     TensorAccessorArgs(*out_indices.buffer()).append_to(compile_time_args);
-
-    const std::array run_time_args = {
-        (std::uint32_t)input.buffer()->address(),
-        (std::uint32_t)out_num_indices.buffer()->address(),
-        (std::uint32_t)out_indices.buffer()->address(),
-        (std::uint32_t)aligned_elements,
-        (std::uint32_t)actual_elements,
-        (std::uint32_t)input.element_size()};
 
     auto kernel_id = tt::tt_metal::CreateKernel(
         program,
@@ -170,9 +162,9 @@ NonZeroIndicesProgramFactory::cached_program_t NonZeroIndicesProgramFactory::cre
         core,
         tt::tt_metal::ReaderDataMovementConfig(compile_time_args, defines));
 
-    tt::tt_metal::SetRuntimeArgs(program, kernel_id, core, run_time_args);
+    tt::tt_metal::SetRuntimeArgs(program, kernel_id, core, runtime_args);
 
-    return cached_program_t{std::move(program), {kernel_id, core, page_size}};
+    return cached_program_t{std::move(program), {kernel_id, core, input_page_size}};
 }
 
 void NonZeroIndicesProgramFactory::override_runtime_arguments(
@@ -182,23 +174,24 @@ void NonZeroIndicesProgramFactory::override_runtime_arguments(
     NonzeroResult& output_tensors) {
     auto& program = cached_program.program;
     auto& shared_vars = cached_program.shared_variables;
-    auto& kernel_id = shared_vars.kernel_id;
-    auto& core = shared_vars.core;
 
     const auto& input = tensor_args.input;
     const auto& out_num_indices = std::get<0>(output_tensors);
     const auto& out_indices = std::get<1>(output_tensors);
 
-    uint32_t alignment_base = 32 / input.element_size();
-    uint32_t aligned_elements = tt::div_up(input.padded_shape()[-1], alignment_base) * alignment_base;
-    uint32_t actual_elements = input.padded_shape()[-1];
-    auto& runtime_args = tt::tt_metal::GetRuntimeArgs(program, kernel_id, core);
-    runtime_args[0] = input.buffer()->address();
-    runtime_args[1] = out_num_indices.buffer()->address();
-    runtime_args[2] = out_indices.buffer()->address();
-    runtime_args[3] = aligned_elements;
-    runtime_args[4] = actual_elements;
-    runtime_args[5] = input.element_size();
+    std::vector<uint32_t> new_runtime_args;
+    uint32_t aligned_output_bytes = 0;
+    compute_geometry(input, out_num_indices, out_indices, new_runtime_args, aligned_output_bytes);
+
+    auto& runtime_args = tt::tt_metal::GetRuntimeArgs(program, shared_vars.kernel_id, shared_vars.core);
+    TT_FATAL(
+        runtime_args.size() == new_runtime_args.size(),
+        "Runtime args size mismatch in non_zero_indices override: expected {}, got {}",
+        runtime_args.size(),
+        new_runtime_args.size());
+    for (size_t i = 0; i < new_runtime_args.size(); ++i) {
+        runtime_args[i] = new_runtime_args[i];
+    }
 }
 
 }  // namespace ttnn::prim
