@@ -94,7 +94,7 @@ return is_blackhole &&
 
 Production auto-selection starts with exact `Float16_b` output cases only. The helper APIs still carry the native fp32 DEST path, but `Float32` automatic selection remains gated off until the input path is lossless enough for TTNN's exact `untilize` contract.
 
-Do not add a permanent `block_width_tiles <= 8` gate. The helper should use the row-decomposition path for wider rows. If a temporary bring-up limit is needed, make it explicit and remove it once `ct>8` validation passes.
+`ttnn.fold` exposed a multi-core production hang for `ct=10` when each core processed multiple rows. Root cause: `fast_untilize_block()` treated the unpack MOP unit width as if every call started with the first row chunk already programmed, while the previous row can leave the MOP configured for its tail chunk (`ct=9` ends `3`, `ct=10` ends `2`). The helper now restores the init-time first-unit MOP invariant before returning from each stateless block call, so wider rows can stay in automatic selection.
 
 Do not add a permanent SyncHalf-only gate. The wrappers and test harness should support both `DST_SYNC_MODE` values.
 
@@ -163,7 +163,7 @@ Keep the existing rule:
 2. Add LLK API wrappers and port `fast_untilize_test.cpp` to use them. Done in `4e7c84b79ea`.
 3. Add `fast_untilize_*` compute API helpers. In progress.
 4. Add `can_use_fast_untilize` in `untilize_helpers.inl`, but keep production helper tests focused. In progress, with the initial production gate limited to exact fp16-output cases.
-5. Enable automatic selection inside `compute_kernel_lib::untilize`.
+5. Enable automatic selection inside `compute_kernel_lib::untilize`, including decomposed wider rows.
 6. Run full LLK accuracy/perf plus production helper tests.
 7. Run targeted TTNN operation smoke tests that use `untilize_helpers.hpp`.
 8. Keep the direct row-strided fallback available until the production path has CI soak.

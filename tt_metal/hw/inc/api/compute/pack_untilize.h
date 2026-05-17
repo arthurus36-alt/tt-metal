@@ -320,7 +320,9 @@ ALWI void fast_untilize_block(
     }
 
     std::uint32_t tiles_done = 0;
-    [[maybe_unused]] std::uint32_t prev_unpack_unit_dim = fast_untilize_next_unit_dim(full_ct_dim);
+    constexpr std::uint32_t first_unit_dim = fast_untilize_next_unit_dim(full_ct_dim);
+
+    [[maybe_unused]] std::uint32_t prev_unpack_unit_dim = first_unit_dim;
     [[maybe_unused]] std::uint32_t prev_pack_unit_dim = 0;
 
     while (tiles_done < full_ct_dim) {
@@ -373,6 +375,17 @@ ALWI void fast_untilize_block(
 
         tiles_done += unit_dim;
     }
+
+#ifdef TRISC_UNPACK
+    {
+        const std::uint32_t operand_id = get_operand_id(icb);
+        // Preserve the init-time first-unit MOP invariant for the next stateless block call.
+        if (!fast_untilize_is_bfp_b_input_format(unpack_src_format[operand_id]) &&
+            prev_unpack_unit_dim != first_unit_dim) {
+            llk_unpack_fast_untilize_reinit_unit_dim<DST_ACCUM_MODE>(first_unit_dim);
+        }
+    }
+#endif
 #else
     pack_untilize_block<full_ct_dim, full_ct_dim>(icb, 1, ocb, 0);
 #endif
