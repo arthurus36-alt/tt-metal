@@ -174,8 +174,9 @@ def test_fast_untilize(formats, dest_acc, dimensions, stimulus_kind):
     formats=fast_untilize_formats(),
     dest_acc=lambda formats: fast_untilize_dest_acc_modes(formats),
     dimensions=FAST_UNTILIZE_DIMS,
+    perf_run_type=[PerfRunType.L1_TO_L1, PerfRunType.PACK_ISOLATE],
 )
-def test_fast_untilize_overflow_guard(formats, dest_acc, dimensions):
+def test_fast_untilize_overflow_guard(formats, dest_acc, dimensions, perf_run_type):
     if get_chip_architecture() != ChipArchitecture.BLACKHOLE:
         pytest.skip("BH only")
 
@@ -202,7 +203,7 @@ def test_fast_untilize_overflow_guard(formats, dest_acc, dimensions):
         formats,
         templates=[
             generate_input_dim(input_dimensions, input_dimensions),
-            PERF_RUN_TYPE(PerfRunType.L1_TO_L1),
+            PERF_RUN_TYPE(perf_run_type),
         ],
         runtimes=[
             TILE_COUNT(tile_count),
@@ -239,4 +240,4 @@ def test_fast_untilize_overflow_guard(formats, dest_acc, dimensions):
         corrupted = struct.unpack_from("<H", raw, (g + 1) * 2)[0]
         assert (
             corrupted == 0
-        ), f"L1 overflow: Guard[{g}] has {corrupted} corrupted uint16 words (dims={dimensions})"
+        ), f"L1 overflow: Guard[{g}] has {corrupted} corrupted uint16 words (dims={dimensions}, run_type={perf_run_type})"

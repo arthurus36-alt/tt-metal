@@ -289,7 +289,10 @@ void run_kernel(RUNTIME_PARAMETERS params)
         PROFILER_SYNC();
         if constexpr (PERF_RUN_TYPE == PerfRunType::PACK_ISOLATE)
         {
-            return;
+            if (NUM_GUARD == 0)
+            {
+                return;
+            }
         }
     }
     {
