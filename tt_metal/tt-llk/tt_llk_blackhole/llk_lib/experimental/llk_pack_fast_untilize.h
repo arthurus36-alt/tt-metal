@@ -322,12 +322,12 @@ inline void _llk_pack_fast_untilize_block_(const std::uint32_t address, const st
     TTI_SETADCZW(p_setadc::PAC, 0, 0, 0, 0, 0b0101);
     ckernel_template::run();
 
-    // Phase 2 emits bottom strip rows and closes the stream.
-    ckernel::mop_sync();
+    // Phase 2 emits bottom strip rows and closes the stream. MOP config syncs
+    // with phase 1 before the bottom DEST phase is selected.
+    _llk_pack_fast_untilize_mop_config_(unit_dim, true);
     _llk_pack_fast_untilize_select_phase_<Dst, 0>();
     TTI_SETADCXY(p_setadc::PAC, 0, 0, 0, 0, 0b0011);
     TTI_SETADCZW(p_setadc::PAC, 0, 0, 0, 0, 0b0101);
-    _llk_pack_fast_untilize_mop_config_(unit_dim, true);
     ckernel_template::run();
 }
 
