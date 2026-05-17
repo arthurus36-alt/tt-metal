@@ -65,6 +65,7 @@ constexpr std::uint32_t FAST_UNTILIZE_ROW_ADVANCE_REPLAY_LEN    = 2;
 constexpr std::uint32_t FAST_UNTILIZE_PHASE_ROWS                = FACE_R_DIM;
 constexpr std::uint32_t FAST_UNTILIZE_BLOCK_STRIDE_ROWS         = 4 * FAST_UNTILIZE_PHASE_ROWS;
 constexpr std::uint32_t FAST_UNTILIZE_PHASE_PAIR_STRIDE_ROWS    = 2 * FAST_UNTILIZE_BLOCK_STRIDE_ROWS;
+constexpr std::uint32_t FAST_UNTILIZE_MOP_LAST_OUTER_CFG_INDEX  = 7;
 
 inline void _llk_pack_fast_untilize_configure_addrmod_()
 {
@@ -123,6 +124,19 @@ inline void _llk_pack_fast_untilize_mop_config_(const std::uint32_t unit_dim = 4
         tmp.set_last_outer_loop_instr(_llk_pack_fast_untilize_row_pacr_(ADDR_MOD_1, tail_intf, last ? 1 : 0));
         tmp.program();
     }
+}
+
+inline void _llk_pack_fast_untilize_mop_patch_last_(const std::uint32_t unit_dim, const bool last)
+{
+    LLK_ASSERT(unit_dim >= 2 && unit_dim <= 4, "fast_untilize pack supports unit_dim 2, 3, or 4");
+
+    const std::uint32_t tail_intf       = unit_dim == 3 ? p_pacr::TWO_INTFS_ACTIVE : p_pacr::ALL_INTF_ACTIVE;
+    const std::uint32_t read_intf_sel   = unit_dim == 2 ? p_pacr::ALL_INTF_ACTIVE : tail_intf;
+    const std::uint32_t last_outer_pacr = _llk_pack_fast_untilize_row_pacr_(ADDR_MOD_1, read_intf_sel, last ? 1 : 0);
+
+    volatile std::uint32_t* mop_cfg = reinterpret_cast<volatile std::uint32_t*>(TENSIX_MOP_CFG_BASE);
+    ckernel::mop_sync();
+    mop_cfg[FAST_UNTILIZE_MOP_LAST_OUTER_CFG_INDEX] = last_outer_pacr;
 }
 
 inline void _llk_pack_fast_untilize_load_row_advance_replay_()
@@ -322,9 +336,9 @@ inline void _llk_pack_fast_untilize_block_(const std::uint32_t address, const st
     TTI_SETADCZW(p_setadc::PAC, 0, 0, 0, 0, 0b0101);
     ckernel_template::run();
 
-    // Phase 2 emits bottom strip rows and closes the stream. MOP config syncs
-    // with phase 1 before the bottom DEST phase is selected.
-    _llk_pack_fast_untilize_mop_config_(unit_dim, true);
+    // Phase 2 emits bottom strip rows and closes the stream. Phase 1 already
+    // programmed the MOP body; only the final PACR's Last bit changes.
+    _llk_pack_fast_untilize_mop_patch_last_(unit_dim, true);
     _llk_pack_fast_untilize_select_phase_<Dst, 0>();
     TTI_SETADCXY(p_setadc::PAC, 0, 0, 0, 0, 0b0011);
     TTI_SETADCZW(p_setadc::PAC, 0, 0, 0, 0, 0b0101);
