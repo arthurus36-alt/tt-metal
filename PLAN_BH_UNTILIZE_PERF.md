@@ -583,6 +583,12 @@ G5.2 wide-row MOP/replay retry:
 - Validation passes:
   - `test_fast_untilize.py`: 63 passed.
   - `perf_fast_untilize.py`: 63 passed.
+- Fresh apples-to-apples regular comparison after the MOP/replay retry:
+  - `perf_fast_untilize.py`: 63 passed.
+  - `perf_fast_untilize_legacy_compare.py`: 63 passed.
+  - Fast path wins on all 63 `L1_TO_L1` points and all 63 `PACK_ISOLATE` points.
+  - Average delta: `L1_TO_L1 -37.9%`, `PACK_ISOLATE -36.8%`.
+  - Steady-state (`loop_factor=16`) average delta: `L1_TO_L1 -39.7%`, `PACK_ISOLATE -42.2%`.
 - Latest steady-state wide-row TILE_LOOP with MOP/replay:
 
 | rt | ct | L1_TO_L1 | PACK_ISOLATE |
@@ -605,7 +611,7 @@ G5.2 wide-row MOP/replay retry:
 
 Milestone G6 - integration into real `pack_untilize`:
 - Add a template/runtime gate, e.g. `DestLayout::DirtyForUntilize` or `FAST_PACK_UNTILIZE_BH`, with legacy fallback.
-- First select the fast MOP path when all constraints are met: BH, 16-bit Dst view, `dest_acc=No`, `num_faces=4`, safe output format, and `full_ct_dim>=2`. Use the contiguous MOP for `ct<=4` and the direct row fallback for wider decomposed rows. Keep `ct=1` on legacy.
+- First select the fast MOP path when all constraints are met: BH, 16-bit Dst view, `dest_acc=No`, `num_faces=4`, safe output format, and `full_ct_dim>=2`. Use the contiguous MOP for `ct<=4` and the row-strided MOP/replay path for wider decomposed rows. Keep the direct row implementation as a fallback knob and keep `ct=1` on legacy.
 - Keep `test_fast_untilize.py` as the bring-up oracle, then add/extend `test_zzz_pack_untilize.py` coverage for the integrated path.
 
 Milestone G7 - validation gates:
