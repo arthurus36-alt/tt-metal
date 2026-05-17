@@ -3,9 +3,14 @@
 
 import pytest
 from conftest import skip_for_quasar, skip_for_wormhole
-from helpers.format_config import DataFormat
-from helpers.llk_params import DestAccumulation, PerfRunType
-from helpers.param_config import input_output_formats, parametrize
+from fast_untilize_common import (
+    FAST_UNTILIZE_CT_DIMS,
+    FAST_UNTILIZE_RT_DIMS,
+    fast_untilize_dest_acc_modes,
+    fast_untilize_formats,
+)
+from helpers.llk_params import PerfRunType
+from helpers.param_config import parametrize
 from helpers.perf import PerfConfig
 from helpers.stimuli_config import StimuliConfig
 from helpers.test_variant_parameters import (
@@ -16,20 +21,14 @@ from helpers.test_variant_parameters import (
 )
 
 
-def fast_untilize_dest_acc_modes(formats):
-    if formats.output_format == DataFormat.Float32:
-        return [DestAccumulation.Yes]
-    return [DestAccumulation.No, DestAccumulation.Yes]
-
-
 @pytest.mark.perf
 @skip_for_wormhole
 @skip_for_quasar
 @parametrize(
-    formats=input_output_formats([DataFormat.Float16_b, DataFormat.Float32], same=True),
+    formats=fast_untilize_formats(),
     dest_acc=lambda formats: fast_untilize_dest_acc_modes(formats),
-    rt_dim=[1, 2, 4],
-    ct_dim=[2, 3, 4, 5, 6, 7, 8],
+    rt_dim=FAST_UNTILIZE_RT_DIMS,
+    ct_dim=FAST_UNTILIZE_CT_DIMS,
     loop_factor=[1, 4, 16],
 )
 def test_perf_fast_untilize(

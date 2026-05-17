@@ -15,11 +15,16 @@ import struct
 
 import pytest
 import torch
+from fast_untilize_common import (
+    FAST_UNTILIZE_DIMS,
+    fast_untilize_dest_acc_modes,
+    fast_untilize_formats,
+)
 from helpers.chip_architecture import ChipArchitecture, get_chip_architecture
 from helpers.format_config import DataFormat
 from helpers.golden_generators import UntilizeGolden, get_golden_generator
-from helpers.llk_params import DestAccumulation, PerfRunType, format_dict
-from helpers.param_config import input_output_formats, parametrize
+from helpers.llk_params import PerfRunType, format_dict
+from helpers.param_config import parametrize
 from helpers.stimuli_config import StimuliConfig
 from helpers.stimuli_generator import generate_stimuli
 from helpers.test_config import TestConfig
@@ -36,15 +41,6 @@ from ttexalens.tt_exalens_lib import read_from_device
 
 TILE_R = 32
 TILE_C = 32
-FAST_UNTILIZE_DIMS = [
-    (rt_dim, ct_dim) for rt_dim in [1, 2, 4] for ct_dim in range(2, 9)
-]
-
-
-def fast_untilize_dest_acc_modes(formats):
-    if formats.output_format == DataFormat.Float32:
-        return [DestAccumulation.Yes]
-    return [DestAccumulation.No, DestAccumulation.Yes]
 
 
 def generate_tile_face_row_ids(tile_count, dtype=torch.bfloat16):
@@ -58,7 +54,7 @@ def generate_tile_face_row_ids(tile_count, dtype=torch.bfloat16):
 
 
 @parametrize(
-    formats=input_output_formats([DataFormat.Float16_b, DataFormat.Float32], same=True),
+    formats=fast_untilize_formats(),
     dest_acc=lambda formats: fast_untilize_dest_acc_modes(formats),
     dimensions=FAST_UNTILIZE_DIMS,
     stimulus_kind=["row_id", "random"],
@@ -158,7 +154,7 @@ def test_fast_untilize(formats, dest_acc, dimensions, stimulus_kind):
 
 
 @parametrize(
-    formats=input_output_formats([DataFormat.Float16_b, DataFormat.Float32], same=True),
+    formats=fast_untilize_formats(),
     dest_acc=lambda formats: fast_untilize_dest_acc_modes(formats),
     dimensions=FAST_UNTILIZE_DIMS,
 )
