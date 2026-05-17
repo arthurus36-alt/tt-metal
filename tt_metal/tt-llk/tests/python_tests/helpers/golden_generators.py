@@ -2807,7 +2807,11 @@ class UntilizeGolden:
     ):
         from helpers.tilize_untilize import untilize_block
 
-        if input_format == DataFormat.MxFp4:
+        if input_format == DataFormat.Bfp4_b:
+            operand = _bfp4b_to_float16b(operand)
+        elif input_format == DataFormat.Bfp8_b:
+            operand = _bfp8b_to_float16b(operand)
+        elif input_format == DataFormat.MxFp4:
             # Quantize MXFP4 inputs to match pack/unpack precision before untilize.
             operand = quantize_mx_tensor_chunked(operand, input_format)
 

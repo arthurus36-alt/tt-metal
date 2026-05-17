@@ -7,7 +7,8 @@
 // This is the standard unpack_A face stream specialized for fast_untilize:
 // emit only real SrcA dvalids and skip the generic unpack_A zero SrcB sideband.
 // Math can then clear only SrcA, reducing dvalid traffic for the focused
-// fast-untilize path.
+// fast-untilize path. unit_dim=1 is used for compressed BFP tile streams where
+// each tile must be addressed explicitly to skip exponent sections.
 
 #pragma once
 
@@ -21,7 +22,7 @@ namespace ckernel
 template <bool is_fp32_dest_acc_en = false>
 inline void _llk_unpack_fast_untilize_mop_config_(const std::uint32_t unit_dim = 4)
 {
-    LLK_ASSERT(unit_dim >= 2 && unit_dim <= 4, "fast_untilize unpack supports unit_dim 2, 3, or 4");
+    LLK_ASSERT(unit_dim >= 1 && unit_dim <= 4, "fast_untilize unpack supports unit_dim 1, 2, 3, or 4");
 
     static constexpr std::uint32_t unpack_srca            = TT_OP_UNPACR(SrcA, 0b1, 0, 0, 0, 1, 1, p_unpacr::RAREFYB_DISABLE, 0, 0, 0, 0, 1);
     static constexpr std::uint32_t unpack_srcb_set_dvalid = TT_OP_UNPACR_NOP(SrcB, 0, 0, p_unpacr_nop::SET_DVALID, 0, 0, 0, 0, p_unpacr_nop::UNP_ZEROSRC);
@@ -59,7 +60,7 @@ inline void _llk_unpack_fast_untilize_reinit_unit_dim_(const std::uint32_t unit_
 inline void _llk_unpack_fast_untilize_block_(const std::uint32_t address, [[maybe_unused]] const std::uint32_t unit_dim = 4)
 {
     LLK_ASSERT(is_valid_L1_address(address), "L1 address must be in valid L1 memory region");
-    LLK_ASSERT(unit_dim >= 2 && unit_dim <= 4, "fast_untilize unpack supports unit_dim 2, 3, or 4");
+    LLK_ASSERT(unit_dim >= 1 && unit_dim <= 4, "fast_untilize unpack supports unit_dim 1, 2, 3, or 4");
 
     TTI_SETADCZW(0b011, 0, 0, 0, 0, 0b1111);
 

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: © 2026 Tenstorrent AI ULC
 # SPDX-License-Identifier: Apache-2.0
 
-from helpers.format_config import DataFormat
+from helpers.format_config import DataFormat, InputOutputFormat
 from helpers.llk_params import DestAccumulation
 from helpers.param_config import input_output_formats
 
@@ -15,7 +15,13 @@ FAST_UNTILIZE_DIMS = [
 
 
 def fast_untilize_formats():
-    return input_output_formats([DataFormat.Float16_b, DataFormat.Float32], same=True)
+    return [
+        *input_output_formats([DataFormat.Float16_b, DataFormat.Float32], same=True),
+        InputOutputFormat(DataFormat.Bfp8_b, DataFormat.Float16_b),
+        InputOutputFormat(DataFormat.Bfp8_b, DataFormat.Float32),
+        InputOutputFormat(DataFormat.Bfp4_b, DataFormat.Float16_b),
+        InputOutputFormat(DataFormat.Bfp4_b, DataFormat.Float32),
+    ]
 
 
 def fast_untilize_dest_acc_modes(formats):

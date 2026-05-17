@@ -24,6 +24,8 @@ std::uint32_t math_sync_tile_dst_index = 0;
 
 constexpr std::uint32_t FAST_UNTILIZE_MAX_UNIT_DIM = 4;
 constexpr std::uint32_t MAX_UNITS_PER_ROW          = 16;
+constexpr bool FAST_UNTILIZE_BFP_B_INPUT =
+    UNPACK_A_IN == ckernel::to_underlying(DataFormat::Bfp8_b) || UNPACK_A_IN == ckernel::to_underlying(DataFormat::Bfp4_b);
 
 static_assert(PERF_RUN_TYPE != PerfRunType::L1_CONGESTION, "L1 congestion mode is not supported for fast_untilize");
 static_assert(BLOCK_CT_DIM == FULL_CT_DIM, "fast_untilize_test expects one full tile row per kernel instance");
@@ -81,7 +83,7 @@ void run_kernel(RUNTIME_PARAMETERS params)
         ZONE_SCOPED("INIT")
         _llk_unpack_hw_configure_<is_fp32_dest_acc_en>(
             formats.unpack_A_src, formats.unpack_B_src, formats.unpack_A_dst, formats.unpack_B_dst, FACE_R_DIM, FACE_R_DIM, 4, 4);
-        ckernel::_llk_unpack_fast_untilize_init_<is_fp32_dest_acc_en>(formats.unpack_A_src, formats.unpack_A_dst, unit_dims[0]);
+        ckernel::_llk_unpack_fast_untilize_init_<is_fp32_dest_acc_en>(formats.unpack_A_src, formats.unpack_A_dst, FAST_UNTILIZE_BFP_B_INPUT ? 1 : unit_dims[0]);
         PROFILER_SYNC();
     }
     {
@@ -106,12 +108,22 @@ void run_kernel(RUNTIME_PARAMETERS params)
                 for (std::uint32_t u = 0; u < units_per_row; u++)
                 {
                     const std::uint32_t unit_dim = unit_dims[u];
-                    if (unit_dim != prev_unit_dim)
+                    if constexpr (FAST_UNTILIZE_BFP_B_INPUT)
                     {
-                        ckernel::_llk_unpack_fast_untilize_reinit_unit_dim_<is_fp32_dest_acc_en>(unit_dim);
-                        prev_unit_dim = unit_dim;
+                        for (std::uint32_t tile = 0; tile < unit_dim; tile++)
+                        {
+                            ckernel::_llk_unpack_fast_untilize_block_(L1_ADDRESS(buffer_A[rt * FULL_CT_DIM + chunk_col + tile]), 1);
+                        }
                     }
-                    ckernel::_llk_unpack_fast_untilize_block_(L1_ADDRESS(buffer_A[rt * FULL_CT_DIM + chunk_col]), unit_dim);
+                    else
+                    {
+                        if (unit_dim != prev_unit_dim)
+                        {
+                            ckernel::_llk_unpack_fast_untilize_reinit_unit_dim_<is_fp32_dest_acc_en>(unit_dim);
+                            prev_unit_dim = unit_dim;
+                        }
+                        ckernel::_llk_unpack_fast_untilize_block_(L1_ADDRESS(buffer_A[rt * FULL_CT_DIM + chunk_col]), unit_dim);
+                    }
                     chunk_col += unit_dim;
                 }
             }
@@ -179,7 +191,9 @@ void run_kernel(RUNTIME_PARAMETERS params)
         }
         PROFILER_SYNC();
     }
+
     {
+        // Keep this zone on a distinct line to avoid 16-bit profiler hash collisions.
         ZONE_SCOPED("UNINIT")
         ckernel::_llk_math_fast_untilize_uninit_<is_fp32_dest_acc_en>(formats.math);
     }

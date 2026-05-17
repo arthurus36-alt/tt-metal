@@ -82,7 +82,12 @@ def test_fast_untilize(formats, dest_acc, dimensions, stimulus_kind):
         )
 
     generate_golden = get_golden_generator(UntilizeGolden)
-    golden_tensor = generate_golden(src_A, formats.output_format, input_dimensions)
+    golden_tensor = generate_golden(
+        src_A,
+        formats.output_format,
+        input_dimensions,
+        input_format=formats.input_format,
+    )
 
     configuration = TestConfig(
         "sources/fast_untilize_test.cpp",
