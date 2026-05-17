@@ -8,7 +8,7 @@ Pipeline: fast_untilize unpack -> dedicated fast_untilize math -> fast_untilize
 pack. Output: row-major strip.
 
 Hardcoded: unit_dim={4,2,3} for regular streams; compressed BFP inputs unpack
-one tile at a time. num_faces=4, SyncHalf.
+one tile at a time. num_faces=4.
 Focused goal: silicon-validate the fast-untilize LLK path against golden.
 """
 
@@ -17,6 +17,7 @@ import struct
 import pytest
 import torch
 from fast_untilize_common import (
+    FAST_UNTILIZE_DEST_SYNC_MODES,
     FAST_UNTILIZE_DIMS,
     FAST_UNTILIZE_FACE_C,
     FAST_UNTILIZE_FACE_R,
@@ -36,6 +37,7 @@ from helpers.stimuli_config import StimuliConfig
 from helpers.stimuli_generator import generate_stimuli
 from helpers.test_config import TestConfig
 from helpers.test_variant_parameters import (
+    DEST_SYNC,
     LOOP_FACTOR,
     NUM_FACES,
     NUM_GUARD_TILES,
@@ -66,14 +68,17 @@ def generate_tile_face_row_ids(tile_count, dtype=torch.bfloat16):
     formats=fast_untilize_formats(),
     dest_acc=lambda formats: fast_untilize_dest_acc_modes(formats),
     dimensions=FAST_UNTILIZE_DIMS,
+    dest_sync=FAST_UNTILIZE_DEST_SYNC_MODES,
     stimulus_kind=["row_id", "random"],
 )
-def test_fast_untilize(formats, dest_acc, dimensions, stimulus_kind):
+def test_fast_untilize(formats, dest_acc, dimensions, dest_sync, stimulus_kind):
     if get_chip_architecture() != ChipArchitecture.BLACKHOLE:
         pytest.skip("BH only")
 
     input_height_tiles, input_width_tiles = dimensions
-    assert 2 <= input_width_tiles <= 8, "T5-B fast_untilize supports ct=2..8"
+    assert (
+        input_width_tiles >= 2
+    ), "T5-B fast_untilize supports ct>=2; ct=1 uses legacy fallback"
 
     input_dimensions = [
         input_height_tiles * FAST_UNTILIZE_TILE_R,
@@ -107,6 +112,7 @@ def test_fast_untilize(formats, dest_acc, dimensions, stimulus_kind):
         templates=[
             generate_input_dim(input_dimensions, input_dimensions),
             PERF_RUN_TYPE(PerfRunType.L1_TO_L1),
+            DEST_SYNC(dest_sync),
         ],
         runtimes=[
             TILE_COUNT(tile_count),
@@ -162,6 +168,7 @@ def test_fast_untilize(formats, dest_acc, dimensions, stimulus_kind):
         golden_rows = {row: row_chunks(golden_tensor, row) for row in rows}
         pytest.fail(
             f"fast_untilize output mismatch at index {idx}: "
+            f"dims={dimensions} dest_sync={dest_sync} "
             f"result={res_tensor[idx].item()} golden={golden_tensor[idx].item()} "
             f"row0={row_chunks(res_tensor, 0)} row0_golden={row_chunks(golden_tensor, 0)} "
             f"result_rows={result_rows} golden_rows={golden_rows} "
@@ -174,9 +181,12 @@ def test_fast_untilize(formats, dest_acc, dimensions, stimulus_kind):
     formats=fast_untilize_formats(),
     dest_acc=lambda formats: fast_untilize_dest_acc_modes(formats),
     dimensions=FAST_UNTILIZE_DIMS,
+    dest_sync=FAST_UNTILIZE_DEST_SYNC_MODES,
     perf_run_type=[PerfRunType.L1_TO_L1, PerfRunType.PACK_ISOLATE],
 )
-def test_fast_untilize_overflow_guard(formats, dest_acc, dimensions, perf_run_type):
+def test_fast_untilize_overflow_guard(
+    formats, dest_acc, dimensions, dest_sync, perf_run_type
+):
     if get_chip_architecture() != ChipArchitecture.BLACKHOLE:
         pytest.skip("BH only")
 
@@ -204,6 +214,7 @@ def test_fast_untilize_overflow_guard(formats, dest_acc, dimensions, perf_run_ty
         templates=[
             generate_input_dim(input_dimensions, input_dimensions),
             PERF_RUN_TYPE(perf_run_type),
+            DEST_SYNC(dest_sync),
         ],
         runtimes=[
             TILE_COUNT(tile_count),
@@ -240,4 +251,4 @@ def test_fast_untilize_overflow_guard(formats, dest_acc, dimensions, perf_run_ty
         corrupted = struct.unpack_from("<H", raw, (g + 1) * 2)[0]
         assert (
             corrupted == 0
-        ), f"L1 overflow: Guard[{g}] has {corrupted} corrupted uint16 words (dims={dimensions}, run_type={perf_run_type})"
+        ), f"L1 overflow: Guard[{g}] has {corrupted} corrupted uint16 words (dims={dimensions}, dest_sync={dest_sync}, run_type={perf_run_type})"

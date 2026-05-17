@@ -8,7 +8,7 @@
 //
 // Current shapes: row-decomposed unit_dim={4,2,3}; compressed BFP inputs unpack
 // one tile at a time to skip exponent sections. ct=1 is left to the integrated
-// legacy fallback path. Hardcoded constraints: num_faces=4, SyncHalf.
+// legacy fallback path. Hardcoded constraint: num_faces=4.
 
 #include <cstdint>
 
@@ -29,7 +29,7 @@ constexpr bool FAST_UNTILIZE_BFP_B_INPUT =
 
 static_assert(PERF_RUN_TYPE != PerfRunType::L1_CONGESTION, "L1 congestion mode is not supported for fast_untilize");
 static_assert(BLOCK_CT_DIM == FULL_CT_DIM, "fast_untilize_test expects one full tile row per kernel instance");
-static_assert(FULL_CT_DIM >= 2 && FULL_CT_DIM <= 8, "fast_untilize_test supports ct=2..8; ct=1 uses legacy fallback");
+static_assert(FULL_CT_DIM >= 2, "fast_untilize_test supports ct>=2; ct=1 uses legacy fallback");
 
 inline std::uint32_t decompose_row(const std::uint32_t ct_dim, std::uint32_t unit_dims[MAX_UNITS_PER_ROW])
 {
@@ -153,7 +153,7 @@ void run_kernel(RUNTIME_PARAMETERS params)
 
     {
         ZONE_SCOPED("INIT")
-        _llk_math_pack_sync_init_<DstSync::SyncHalf, is_fp32_dest_acc_en>();
+        _llk_math_pack_sync_init_<dest_sync, is_fp32_dest_acc_en>();
         _llk_math_hw_configure_<is_fp32_dest_acc_en>(formats.math, formats.math);
         ckernel::_llk_math_fast_untilize_init_<is_fp32_dest_acc_en>(formats.math);
         PROFILER_SYNC();
@@ -179,12 +179,12 @@ void run_kernel(RUNTIME_PARAMETERS params)
                 {
                     if constexpr (PERF_RUN_TYPE == PerfRunType::L1_TO_L1)
                     {
-                        _llk_math_wait_for_dest_available_<DstSync::SyncHalf>();
+                        _llk_math_wait_for_dest_available_<dest_sync>();
                     }
                     ckernel::_llk_math_fast_untilize_block_<is_fp32_dest_acc_en>(0, formats.math, unit_dims[u]);
                     if constexpr (PERF_RUN_TYPE == PerfRunType::L1_TO_L1)
                     {
-                        _llk_math_dest_section_done_<DstSync::SyncHalf, is_fp32_dest_acc_en>();
+                        _llk_math_dest_section_done_<dest_sync, is_fp32_dest_acc_en>();
                     }
                 }
             }
@@ -238,10 +238,10 @@ void run_kernel(RUNTIME_PARAMETERS params)
 
     {
         ZONE_SCOPED("INIT")
-        _llk_pack_dest_init_<DstSync::SyncHalf, is_fp32_dest_acc_en>();
+        _llk_pack_dest_init_<dest_sync, is_fp32_dest_acc_en>();
         _llk_pack_hw_configure_<is_fp32_dest_acc_en, ckernel::PackMode::Default>(
             formats.pack_src, formats.pack_dst, SCALE_DATUM_SIZE(formats.pack_dst, TILE_C_DIM * TILE_R_DIM));
-        _llk_pack_fast_untilize_init_<DstSync::SyncHalf, is_fp32_dest_acc_en, FAST_UNTILIZE_MAX_UNIT_DIM, FULL_CT_DIM>(formats.pack_src, formats.pack_dst);
+        _llk_pack_fast_untilize_init_<dest_sync, is_fp32_dest_acc_en, FAST_UNTILIZE_MAX_UNIT_DIM, FULL_CT_DIM>(formats.pack_src, formats.pack_dst);
         PROFILER_SYNC();
     }
     {
@@ -271,16 +271,15 @@ void run_kernel(RUNTIME_PARAMETERS params)
                     }
                     if constexpr (FULL_CT_DIM <= FAST_UNTILIZE_MAX_UNIT_DIM)
                     {
-                        _llk_pack_fast_untilize_block_<FAST_UNTILIZE_MAX_UNIT_DIM, DstSync::SyncHalf>(chunk_address, unit_dim, prev_pack_unit_dim);
+                        _llk_pack_fast_untilize_block_<FAST_UNTILIZE_MAX_UNIT_DIM, dest_sync>(chunk_address, unit_dim, prev_pack_unit_dim);
                     }
                     else
                     {
-                        _llk_pack_fast_untilize_block_strided_<FAST_UNTILIZE_MAX_UNIT_DIM, FULL_CT_DIM, DstSync::SyncHalf>(
-                            chunk_address, unit_dim, prev_pack_unit_dim);
+                        _llk_pack_fast_untilize_block_strided_<FAST_UNTILIZE_MAX_UNIT_DIM, FULL_CT_DIM, dest_sync>(chunk_address, unit_dim, prev_pack_unit_dim);
                     }
                     if constexpr (PERF_RUN_TYPE == PerfRunType::L1_TO_L1)
                     {
-                        _llk_pack_dest_section_done_<DstSync::SyncHalf, is_fp32_dest_acc_en>();
+                        _llk_pack_dest_section_done_<dest_sync, is_fp32_dest_acc_en>();
                     }
                     chunk_col += unit_dim;
                 }
@@ -297,7 +296,7 @@ void run_kernel(RUNTIME_PARAMETERS params)
     }
     {
         ZONE_SCOPED("UNINIT")
-        _llk_pack_fast_untilize_uninit_<DstSync::SyncHalf, is_fp32_dest_acc_en>(formats.pack_dst, formats.pack_src);
+        _llk_pack_fast_untilize_uninit_<dest_sync, is_fp32_dest_acc_en>(formats.pack_dst, formats.pack_src);
     }
 
     if (NUM_GUARD > 1)

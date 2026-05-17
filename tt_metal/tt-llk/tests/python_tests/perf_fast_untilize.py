@@ -5,6 +5,7 @@ import pytest
 from conftest import skip_for_quasar, skip_for_wormhole
 from fast_untilize_common import (
     FAST_UNTILIZE_CT_DIMS,
+    FAST_UNTILIZE_DEST_SYNC_MODES,
     FAST_UNTILIZE_NUM_FACES,
     FAST_UNTILIZE_RT_DIMS,
     FAST_UNTILIZE_TILE_C,
@@ -17,6 +18,7 @@ from helpers.param_config import parametrize
 from helpers.perf import PerfConfig
 from helpers.stimuli_config import StimuliConfig
 from helpers.test_variant_parameters import (
+    DEST_SYNC,
     LOOP_FACTOR,
     NUM_FACES,
     TILE_COUNT,
@@ -32,10 +34,11 @@ from helpers.test_variant_parameters import (
     dest_acc=lambda formats: fast_untilize_dest_acc_modes(formats),
     rt_dim=FAST_UNTILIZE_RT_DIMS,
     ct_dim=FAST_UNTILIZE_CT_DIMS,
+    dest_sync=FAST_UNTILIZE_DEST_SYNC_MODES,
     loop_factor=[1, 4, 16],
 )
 def test_perf_fast_untilize(
-    perf_report, formats, dest_acc, rt_dim, ct_dim, loop_factor
+    perf_report, formats, dest_acc, rt_dim, ct_dim, dest_sync, loop_factor
 ):
     tile_count = rt_dim * ct_dim
     dimensions = (rt_dim * FAST_UNTILIZE_TILE_R, ct_dim * FAST_UNTILIZE_TILE_C)
@@ -49,7 +52,7 @@ def test_perf_fast_untilize(
             PerfRunType.MATH_ISOLATE,
             PerfRunType.PACK_ISOLATE,
         ],
-        templates=[generate_input_dim(dimensions, dimensions)],
+        templates=[generate_input_dim(dimensions, dimensions), DEST_SYNC(dest_sync)],
         runtimes=[
             TILE_COUNT(tile_count),
             LOOP_FACTOR(loop_factor),
