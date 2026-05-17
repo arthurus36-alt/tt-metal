@@ -146,7 +146,6 @@ def main():
         if b["marker"] != args.marker:
             continue
         marker_keys.append(key)
-        tile_cnt = int(b["tile_cnt"])
         for col in run_cols:
             bv = b.get(col, "")
             cv = c.get(col, "")
@@ -161,7 +160,7 @@ def main():
                 regress[col].append((key, bv, cv, pct))
             elif pct < -args.gate:
                 wins[col].append((key, bv, cv, pct))
-            rows_out.append((key, col, bv, cv, pct, tile_cnt))
+            rows_out.append((key, col, bv, cv, pct))
 
     # Print summary
     print(
@@ -205,7 +204,7 @@ def main():
 
     if args.verbose:
         print(f"\n--- All variants ({len(rows_out)} rows) ---")
-        for key, col, bv, cv, pct, tile_cnt in rows_out:
+        for key, col, bv, cv, pct in rows_out:
             label = format_key(key_cols, key)
             col_name = run_col_name(col)
             print(
