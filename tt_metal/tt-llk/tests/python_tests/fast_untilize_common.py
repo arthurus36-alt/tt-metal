@@ -5,6 +5,9 @@ from helpers.format_config import DataFormat, InputOutputFormat
 from helpers.llk_params import DestAccumulation
 from helpers.param_config import input_output_formats
 
+FAST_UNTILIZE_TILE_R = 32
+FAST_UNTILIZE_TILE_C = 32
+FAST_UNTILIZE_NUM_FACES = 4
 FAST_UNTILIZE_RT_DIMS = [1, 2, 4]
 FAST_UNTILIZE_CT_DIMS = [2, 3, 4, 5, 6, 7, 8]
 FAST_UNTILIZE_DIMS = [

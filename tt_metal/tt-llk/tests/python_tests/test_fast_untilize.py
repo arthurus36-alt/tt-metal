@@ -18,6 +18,9 @@ import pytest
 import torch
 from fast_untilize_common import (
     FAST_UNTILIZE_DIMS,
+    FAST_UNTILIZE_NUM_FACES,
+    FAST_UNTILIZE_TILE_C,
+    FAST_UNTILIZE_TILE_R,
     fast_untilize_dest_acc_modes,
     fast_untilize_formats,
 )
@@ -40,14 +43,11 @@ from helpers.test_variant_parameters import (
 from helpers.utils import passed_test
 from ttexalens.tt_exalens_lib import read_from_device
 
-TILE_R = 32
-TILE_C = 32
-
 
 def generate_tile_face_row_ids(tile_count, dtype=torch.bfloat16):
     values = []
     for tile in range(tile_count):
-        for face in range(4):
+        for face in range(FAST_UNTILIZE_NUM_FACES):
             for row in range(16):
                 value = tile * 64 + face * 16 + row + 1
                 values.extend([value] * 16)
@@ -67,7 +67,10 @@ def test_fast_untilize(formats, dest_acc, dimensions, stimulus_kind):
     input_height_tiles, input_width_tiles = dimensions
     assert 2 <= input_width_tiles <= 8, "T5-B fast_untilize supports ct=2..8"
 
-    input_dimensions = [input_height_tiles * TILE_R, input_width_tiles * TILE_C]
+    input_dimensions = [
+        input_height_tiles * FAST_UNTILIZE_TILE_R,
+        input_width_tiles * FAST_UNTILIZE_TILE_C,
+    ]
     tile_count = input_height_tiles * input_width_tiles
 
     src_A, tile_cnt_A, src_B, tile_cnt_B = generate_stimuli(
@@ -100,7 +103,7 @@ def test_fast_untilize(formats, dest_acc, dimensions, stimulus_kind):
         runtimes=[
             TILE_COUNT(tile_count),
             LOOP_FACTOR(1),
-            NUM_FACES(4),
+            NUM_FACES(FAST_UNTILIZE_NUM_FACES),
             NUM_GUARD_TILES(0),
         ],
         variant_stimuli=StimuliConfig(
@@ -169,7 +172,10 @@ def test_fast_untilize_overflow_guard(formats, dest_acc, dimensions):
         pytest.skip("BH only")
 
     input_height_tiles, input_width_tiles = dimensions
-    input_dimensions = [input_height_tiles * TILE_R, input_width_tiles * TILE_C]
+    input_dimensions = [
+        input_height_tiles * FAST_UNTILIZE_TILE_R,
+        input_width_tiles * FAST_UNTILIZE_TILE_C,
+    ]
     tile_count = input_height_tiles * input_width_tiles
     guard_tiles = 5
 
@@ -193,7 +199,7 @@ def test_fast_untilize_overflow_guard(formats, dest_acc, dimensions):
         runtimes=[
             TILE_COUNT(tile_count),
             LOOP_FACTOR(1),
-            NUM_FACES(4),
+            NUM_FACES(FAST_UNTILIZE_NUM_FACES),
             NUM_GUARD_TILES(guard_tiles),
         ],
         variant_stimuli=StimuliConfig(

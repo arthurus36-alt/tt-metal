@@ -5,7 +5,10 @@ import pytest
 from conftest import skip_for_quasar, skip_for_wormhole
 from fast_untilize_common import (
     FAST_UNTILIZE_CT_DIMS,
+    FAST_UNTILIZE_NUM_FACES,
     FAST_UNTILIZE_RT_DIMS,
+    FAST_UNTILIZE_TILE_C,
+    FAST_UNTILIZE_TILE_R,
     fast_untilize_dest_acc_modes,
     fast_untilize_formats,
 )
@@ -35,7 +38,7 @@ def test_perf_fast_untilize(
     perf_report, formats, dest_acc, rt_dim, ct_dim, loop_factor
 ):
     tile_count = rt_dim * ct_dim
-    dimensions = (rt_dim * 32, ct_dim * 32)
+    dimensions = (rt_dim * FAST_UNTILIZE_TILE_R, ct_dim * FAST_UNTILIZE_TILE_C)
 
     configuration = PerfConfig(
         "sources/fast_untilize_test.cpp",
@@ -50,7 +53,7 @@ def test_perf_fast_untilize(
         runtimes=[
             TILE_COUNT(tile_count),
             LOOP_FACTOR(loop_factor),
-            NUM_FACES(4),
+            NUM_FACES(FAST_UNTILIZE_NUM_FACES),
         ],
         variant_stimuli=StimuliConfig(
             None,
