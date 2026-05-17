@@ -321,7 +321,8 @@ inline void _llk_pack_fast_untilize_select_phase_()
 // One call processes one block of block_ct_dim=4 tiles.
 // Output: 4 tiles' worth of RM strip starting at `address` (in 16B units).
 template <std::uint32_t block_ct_dim = 4, DstSync Dst = DstSync::SyncHalf>
-inline void _llk_pack_fast_untilize_block_(const std::uint32_t address, const std::uint32_t unit_dim = block_ct_dim, const std::uint32_t num_faces = 4)
+inline void _llk_pack_fast_untilize_block_(
+    const std::uint32_t address, const std::uint32_t unit_dim, std::uint32_t& prev_unit_dim, const std::uint32_t num_faces = 4)
 {
     static_assert(block_ct_dim >= 2 && block_ct_dim <= 4, "T5-B fast untilize supports block_ct_dim 2, 3, or 4");
     LLK_ASSERT(unit_dim >= 2 && unit_dim <= block_ct_dim, "fast_untilize pack unit_dim must be in [2, block_ct_dim]");
@@ -330,8 +331,16 @@ inline void _llk_pack_fast_untilize_block_(const std::uint32_t address, const st
     program_packer_destination(address);
 
     // Phase 1 emits top strip rows and keeps the pack stream open.
+    if (unit_dim != prev_unit_dim)
+    {
+        _llk_pack_fast_untilize_mop_config_(unit_dim, false);
+        prev_unit_dim = unit_dim;
+    }
+    else
+    {
+        _llk_pack_fast_untilize_mop_patch_last_(unit_dim, false);
+    }
     _llk_pack_fast_untilize_select_phase_<Dst, 128>();
-    _llk_pack_fast_untilize_mop_config_(unit_dim, false);
     TTI_SETADCXY(p_setadc::PAC, 0, 0, 0, 0, 0b0011);
     TTI_SETADCZW(p_setadc::PAC, 0, 0, 0, 0, 0b0101);
     ckernel_template::run();

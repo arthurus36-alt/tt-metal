@@ -271,7 +271,7 @@ void run_kernel(RUNTIME_PARAMETERS params)
                     }
                     if constexpr (FULL_CT_DIM <= FAST_UNTILIZE_MAX_UNIT_DIM)
                     {
-                        _llk_pack_fast_untilize_block_<FAST_UNTILIZE_MAX_UNIT_DIM, DstSync::SyncHalf>(chunk_address, unit_dim);
+                        _llk_pack_fast_untilize_block_<FAST_UNTILIZE_MAX_UNIT_DIM, DstSync::SyncHalf>(chunk_address, unit_dim, prev_pack_unit_dim);
                     }
                     else
                     {
