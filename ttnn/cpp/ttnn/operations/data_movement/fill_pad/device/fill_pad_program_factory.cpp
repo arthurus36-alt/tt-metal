@@ -64,10 +64,10 @@ FillPadProgramFactory::cached_program_t FillPadProgramFactory::create(
     }
 
     const uint32_t padded_height = tt::div_up(height, tt::constants::TILE_HEIGHT) * tt::constants::TILE_HEIGHT;
-    const uint32_t padded_width = tt::div_up(width, tt::constants::TILE_HEIGHT) * tt::constants::TILE_HEIGHT;
+    const uint32_t padded_width = tt::div_up(width, tt::constants::TILE_WIDTH) * tt::constants::TILE_WIDTH;
     const uint32_t tiles_per_2d_tensor =
-        padded_height / tt::constants::TILE_HEIGHT * padded_width / tt::constants::TILE_HEIGHT;
-    const uint32_t tiles_per_tile_row = padded_width / tt::constants::TILE_HEIGHT;
+        padded_height / tt::constants::TILE_HEIGHT * padded_width / tt::constants::TILE_WIDTH;
+    const uint32_t tiles_per_tile_row = padded_width / tt::constants::TILE_WIDTH;
 
     const bool sharded = input_tensor.memory_config().memory_layout() != TensorMemoryLayout::INTERLEAVED;
 
