@@ -8,7 +8,7 @@
 //
 // Current shapes: row-decomposed unit_dim={4,2,3}; ct=1 is left to the
 // integrated legacy fallback path. Hardcoded constraints: num_faces=4,
-// FP16 / bf16, SyncHalf.
+// SyncHalf.
 
 #include <cstdint>
 
@@ -81,7 +81,7 @@ void run_kernel(RUNTIME_PARAMETERS params)
         ZONE_SCOPED("INIT")
         _llk_unpack_hw_configure_<is_fp32_dest_acc_en>(
             formats.unpack_A_src, formats.unpack_B_src, formats.unpack_A_dst, formats.unpack_B_dst, FACE_R_DIM, FACE_R_DIM, 4, 4);
-        ckernel::_llk_unpack_fast_untilize_init_(formats.unpack_A_src, formats.unpack_A_dst, unit_dims[0]);
+        ckernel::_llk_unpack_fast_untilize_init_<is_fp32_dest_acc_en>(formats.unpack_A_src, formats.unpack_A_dst, unit_dims[0]);
         PROFILER_SYNC();
     }
     {
@@ -92,7 +92,7 @@ void run_kernel(RUNTIME_PARAMETERS params)
         }
         else if constexpr (PERF_RUN_TYPE == PerfRunType::MATH_ISOLATE)
         {
-            _perf_unpack_loop_set_valid<true, false>(LOOP_FACTOR * FULL_RT_DIM * FULL_CT_DIM * 4);
+            _perf_unpack_loop_set_valid<true, is_fp32_dest_acc_en>(LOOP_FACTOR * FULL_RT_DIM * FULL_CT_DIM * 4);
             PROFILER_SYNC();
             return;
         }
@@ -108,7 +108,7 @@ void run_kernel(RUNTIME_PARAMETERS params)
                     const std::uint32_t unit_dim = unit_dims[u];
                     if (unit_dim != prev_unit_dim)
                     {
-                        ckernel::_llk_unpack_fast_untilize_reinit_unit_dim_(unit_dim);
+                        ckernel::_llk_unpack_fast_untilize_reinit_unit_dim_<is_fp32_dest_acc_en>(unit_dim);
                         prev_unit_dim = unit_dim;
                     }
                     ckernel::_llk_unpack_fast_untilize_block_(L1_ADDRESS(buffer_A[rt * FULL_CT_DIM + chunk_col]), unit_dim);
@@ -154,7 +154,7 @@ void run_kernel(RUNTIME_PARAMETERS params)
         }
         else if constexpr (PERF_RUN_TYPE == PerfRunType::UNPACK_ISOLATE)
         {
-            _perf_math_loop_clear_valid<true, false>(LOOP_FACTOR * FULL_RT_DIM * FULL_CT_DIM * 4);
+            _perf_math_loop_clear_valid<true, is_fp32_dest_acc_en>(LOOP_FACTOR * FULL_RT_DIM * FULL_CT_DIM * 4);
             PROFILER_SYNC();
             return;
         }

@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import pytest
+from conftest import skip_for_quasar, skip_for_wormhole
 from helpers.format_config import DataFormat
-from helpers.llk_params import PerfRunType
+from helpers.llk_params import DestAccumulation, PerfRunType
 from helpers.param_config import input_output_formats, parametrize
 from helpers.perf import PerfConfig
 from helpers.stimuli_config import StimuliConfig
@@ -13,11 +14,16 @@ from helpers.test_variant_parameters import (
     generate_input_dim,
 )
 
-from conftest import skip_for_quasar, skip_for_wormhole
+
+def fast_untilize_dest_acc_modes(formats):
+    if formats.output_format == DataFormat.Float32:
+        return [DestAccumulation.Yes]
+    return [DestAccumulation.No, DestAccumulation.Yes]
 
 
-def legacy_block_ct_dim(ct_dim):
-    for candidate in range(min(ct_dim, 8), 0, -1):
+def legacy_block_ct_dim(ct_dim, dest_acc):
+    max_dest_tiles = 4 if dest_acc == DestAccumulation.Yes else 8
+    for candidate in range(min(ct_dim, max_dest_tiles), 0, -1):
         if ct_dim % candidate == 0:
             return candidate
     return 1
@@ -27,17 +33,18 @@ def legacy_block_ct_dim(ct_dim):
 @skip_for_wormhole
 @skip_for_quasar
 @parametrize(
-    formats=input_output_formats([DataFormat.Float16_b], same=True),
+    formats=input_output_formats([DataFormat.Float16_b, DataFormat.Float32], same=True),
+    dest_acc=lambda formats: fast_untilize_dest_acc_modes(formats),
     rt_dim=[1, 2, 4],
     ct_dim=[2, 3, 4, 5, 6, 7, 8],
     loop_factor=[1, 4, 16],
 )
 def test_perf_fast_untilize_legacy_compare(
-    perf_report, formats, rt_dim, ct_dim, loop_factor
+    perf_report, formats, dest_acc, rt_dim, ct_dim, loop_factor
 ):
     tile_count = rt_dim * ct_dim
     dimensions = (rt_dim * 32, ct_dim * 32)
-    block_ct_dim = legacy_block_ct_dim(ct_dim)
+    block_ct_dim = legacy_block_ct_dim(ct_dim, dest_acc)
 
     configuration = PerfConfig(
         "sources/pack_untilize_perf.cpp",
@@ -62,6 +69,7 @@ def test_perf_fast_untilize_legacy_compare(
             tile_count_res=tile_count,
         ),
         compile_time_formats=True,
+        dest_acc=dest_acc,
     )
 
     configuration.run(perf_report)

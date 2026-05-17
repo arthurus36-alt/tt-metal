@@ -7,7 +7,7 @@ Fast-untilize MVP test (T5-B / tt-metal#42048 + #42049).
 Pipeline: fast_untilize unpack -> dedicated fast_untilize math -> fast_untilize
 pack. Output: row-major strip.
 
-Hardcoded: unit_dim={4,2,3}, num_faces=4, FP16/bf16, SyncHalf.
+Hardcoded: unit_dim={4,2,3}, num_faces=4, SyncHalf.
 Focused goal: silicon-validate the fast-untilize LLK path against golden.
 """
 
@@ -31,6 +31,7 @@ from helpers.test_variant_parameters import (
     TILE_COUNT,
     generate_input_dim,
 )
+from helpers.utils import passed_test
 from ttexalens.tt_exalens_lib import read_from_device
 
 TILE_R = 32
@@ -40,19 +41,25 @@ FAST_UNTILIZE_DIMS = [
 ]
 
 
-def generate_tile_face_row_ids(tile_count):
+def fast_untilize_dest_acc_modes(formats):
+    if formats.output_format == DataFormat.Float32:
+        return [DestAccumulation.Yes]
+    return [DestAccumulation.No, DestAccumulation.Yes]
+
+
+def generate_tile_face_row_ids(tile_count, dtype=torch.bfloat16):
     values = []
     for tile in range(tile_count):
         for face in range(4):
             for row in range(16):
                 value = tile * 64 + face * 16 + row + 1
                 values.extend([value] * 16)
-    return torch.tensor(values, dtype=torch.bfloat16)
+    return torch.tensor(values, dtype=dtype)
 
 
 @parametrize(
-    formats=input_output_formats([DataFormat.Float16_b], same=True),
-    dest_acc=[DestAccumulation.No],
+    formats=input_output_formats([DataFormat.Float16_b, DataFormat.Float32], same=True),
+    dest_acc=lambda formats: fast_untilize_dest_acc_modes(formats),
     dimensions=FAST_UNTILIZE_DIMS,
     stimulus_kind=["row_id", "random"],
 )
@@ -74,7 +81,9 @@ def test_fast_untilize(formats, dest_acc, dimensions, stimulus_kind):
         sfpu=False,
     )
     if stimulus_kind == "row_id":
-        src_A = generate_tile_face_row_ids(tile_count)
+        src_A = generate_tile_face_row_ids(
+            tile_count, dtype=format_dict[formats.input_format]
+        )
 
     generate_golden = get_golden_generator(UntilizeGolden)
     golden_tensor = generate_golden(src_A, formats.output_format, input_dimensions)
@@ -114,6 +123,14 @@ def test_fast_untilize(formats, dest_acc, dimensions, stimulus_kind):
 
     res_tensor = torch.tensor(res_from_L1, dtype=format_dict[formats.output_format])
 
+    # Float32 uses the current SrcA/SrcB route, which narrows L1 Float32 input
+    # to Tf32 before math. Validate tolerance here; bit-exact Float32->Float32
+    # needs a future unpack-to-DEST fast-untilize design.
+    is_exact_format = formats.output_format != DataFormat.Float32
+    if not is_exact_format:
+        assert passed_test(golden_tensor, res_tensor, formats.output_format)
+        return
+
     mismatches = torch.nonzero(res_tensor != golden_tensor, as_tuple=False).flatten()
     if mismatches.numel() > 0:
         idx = int(mismatches[0])
@@ -141,8 +158,8 @@ def test_fast_untilize(formats, dest_acc, dimensions, stimulus_kind):
 
 
 @parametrize(
-    formats=input_output_formats([DataFormat.Float16_b], same=True),
-    dest_acc=[DestAccumulation.No],
+    formats=input_output_formats([DataFormat.Float16_b, DataFormat.Float32], same=True),
+    dest_acc=lambda formats: fast_untilize_dest_acc_modes(formats),
     dimensions=FAST_UNTILIZE_DIMS,
 )
 def test_fast_untilize_overflow_guard(formats, dest_acc, dimensions):

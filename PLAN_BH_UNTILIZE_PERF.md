@@ -830,6 +830,110 @@ Pre-stage next iter's config in inactive bank while current iter is packing. Eli
 
 ## 9. Next action
 
+### 2026-05-17 fp32 DEST status
+
+- Native fp32 DEST support is now implemented for the experimental BH fast-untilize path rather than using the fast-tilize compat shortcut.
+- Unpack emits zero SrcB dvalids only when `is_fp32_dest_acc_en` so math can use `ELWADD` as the native SrcA + zero-SrcB -> DEST copy.
+- Math keeps fp32 DEST enabled and uses an `ELWADD` copy path for fp32 DEST; the original `MOVA2D` path remains for 16-bit DEST.
+- Pack no longer forces `Read_32b_data=0` or reconfigures source format to bf16 in fast-untilize init; it relies on normal pack configuration and uses the caller's `pack_src_format` for strides.
+- Correctness status: `python3 -m pytest -q tt_metal/tt-llk/tests/python_tests/test_fast_untilize.py` passes with `189 passed`, covering bf16 `dest_acc=No/Yes`, Float32 `dest_acc=Yes`, all `rt={1,2,4}`, `ct=2..8`, row-id/random stimuli, and overflow guards.
+- Caveat: Float32 input through this path still follows existing source-register format inference (`Float32 -> Tf32` before math unless a future unpack-to-dest design is added). This is native fp32 DEST, not a full-precision Float32 unpack-to-dest pipeline.
+
+### 2026-05-17 perf comparison with dest mode
+
+- Expanded `perf_fast_untilize.py` and `perf_fast_untilize_legacy_compare.py` to include destination mode in the sweep:
+  - `Float16_b -> Float16_b`, `dest_acc=No`
+  - `Float16_b -> Float16_b`, `dest_acc=Yes`
+  - `Float32 -> Float32`, `dest_acc=Yes`
+- Full comparison command: `python3 -m pytest -q tt_metal/tt-llk/tests/python_tests/perf_fast_untilize.py tt_metal/tt-llk/tests/python_tests/perf_fast_untilize_legacy_compare.py`
+- Result: `378 passed in 121.60s`.
+- Fast path wins on all `189/189` `L1_TO_L1` points and all `189/189` `PACK_ISOLATE` points.
+- Legacy baseline note: for `dest_acc=Yes`, SyncHalf has only four destination tiles, so the regular baseline caps `BLOCK_CT_DIM` at 4. That means `ct=5/7` use `block_ct=1`, `ct=6` uses `block_ct=3`, and `ct=8` uses `block_ct=4`.
+
+Average delta over all `loop_factor={1,4,16}` points:
+
+| format | dest_acc | points | L1_TO_L1 avg delta | PACK_ISOLATE avg delta |
+|:---|:---:|---:|---:|---:|
+| Float16_b | No | 63 | -38.0% | -36.8% |
+| Float16_b | Yes | 63 | -50.5% | -51.6% |
+| Float32 | Yes | 63 | -41.0% | -41.7% |
+
+Steady-state (`loop_factor=16`) average delta:
+
+| format | dest_acc | points | L1_TO_L1 avg delta | PACK_ISOLATE avg delta |
+|:---|:---:|---:|---:|---:|
+| Float16_b | No | 21 | -39.7% | -42.2% |
+| Float16_b | Yes | 21 | -54.8% | -56.5% |
+| Float32 | Yes | 21 | -45.3% | -46.5% |
+
+Steady-state (`loop_factor=16`) `L1_TO_L1` comparison:
+
+| format | dest_acc | rt | ct | legacy | fast | delta |
+|:---|:---:|---:|---:|---:|---:|---:|
+| Float16_b | No | 1 | 2 | 135.31 | 67.41 | -50.2% |
+| Float16_b | No | 1 | 3 | 112.67 | 50.73 | -55.0% |
+| Float16_b | No | 1 | 4 | 100.98 | 38.23 | -62.1% |
+| Float16_b | No | 1 | 5 | 94.36 | 76.75 | -18.7% |
+| Float16_b | No | 1 | 6 | 89.48 | 64.24 | -28.2% |
+| Float16_b | No | 1 | 7 | 86.26 | 58.35 | -32.4% |
+| Float16_b | No | 1 | 8 | 83.83 | 51.08 | -39.1% |
+| Float16_b | No | 2 | 2 | 132.48 | 75.14 | -43.3% |
+| Float16_b | No | 2 | 3 | 110.27 | 56.98 | -48.3% |
+| Float16_b | No | 2 | 4 | 99.07 | 34.65 | -65.0% |
+| Float16_b | No | 2 | 5 | 92.16 | 75.69 | -17.9% |
+| Float16_b | No | 2 | 6 | 87.67 | 62.93 | -28.2% |
+| Float16_b | No | 2 | 7 | 84.46 | 57.33 | -32.1% |
+| Float16_b | No | 2 | 8 | 82.14 | 50.39 | -38.6% |
+| Float16_b | No | 4 | 2 | 131.03 | 71.65 | -45.3% |
+| Float16_b | No | 4 | 3 | 109.10 | 54.35 | -50.2% |
+| Float16_b | No | 4 | 4 | 97.87 | 37.14 | -62.1% |
+| Float16_b | No | 4 | 5 | 91.28 | 75.06 | -17.8% |
+| Float16_b | No | 4 | 6 | 86.79 | 62.30 | -28.2% |
+| Float16_b | No | 4 | 7 | 83.61 | 56.81 | -32.1% |
+| Float16_b | No | 4 | 8 | 81.36 | 49.81 | -38.8% |
+| Float16_b | Yes | 1 | 2 | 135.34 | 67.44 | -50.2% |
+| Float16_b | Yes | 1 | 3 | 112.60 | 50.81 | -54.9% |
+| Float16_b | Yes | 1 | 4 | 100.98 | 38.53 | -61.8% |
+| Float16_b | Yes | 1 | 5 | 198.82 | 76.78 | -61.4% |
+| Float16_b | Yes | 1 | 6 | 110.18 | 64.76 | -41.2% |
+| Float16_b | Yes | 1 | 7 | 198.31 | 58.57 | -70.5% |
+| Float16_b | Yes | 1 | 8 | 99.09 | 51.26 | -48.3% |
+| Float16_b | Yes | 2 | 2 | 132.50 | 75.23 | -43.2% |
+| Float16_b | Yes | 2 | 3 | 110.18 | 56.96 | -48.3% |
+| Float16_b | Yes | 2 | 4 | 99.09 | 34.86 | -64.8% |
+| Float16_b | Yes | 2 | 5 | 197.92 | 75.34 | -61.9% |
+| Float16_b | Yes | 2 | 6 | 108.92 | 63.06 | -42.1% |
+| Float16_b | Yes | 2 | 7 | 197.66 | 57.46 | -70.9% |
+| Float16_b | Yes | 2 | 8 | 97.87 | 50.28 | -48.6% |
+| Float16_b | Yes | 4 | 2 | 131.03 | 71.67 | -45.3% |
+| Float16_b | Yes | 4 | 3 | 108.92 | 54.38 | -50.1% |
+| Float16_b | Yes | 4 | 4 | 97.87 | 37.23 | -62.0% |
+| Float16_b | Yes | 4 | 5 | 197.46 | 74.67 | -62.2% |
+| Float16_b | Yes | 4 | 6 | 108.29 | 62.36 | -42.4% |
+| Float16_b | Yes | 4 | 7 | 197.33 | 56.87 | -71.2% |
+| Float16_b | Yes | 4 | 8 | 97.40 | 49.80 | -48.9% |
+| Float32 | Yes | 1 | 2 | 137.75 | 69.75 | -49.4% |
+| Float32 | Yes | 1 | 3 | 114.15 | 68.00 | -40.4% |
+| Float32 | Yes | 1 | 4 | 102.13 | 51.89 | -49.2% |
+| Float32 | Yes | 1 | 5 | 200.97 | 93.25 | -53.6% |
+| Float32 | Yes | 1 | 6 | 111.53 | 78.71 | -29.4% |
+| Float32 | Yes | 1 | 7 | 200.58 | 76.30 | -62.0% |
+| Float32 | Yes | 1 | 8 | 99.95 | 67.10 | -32.9% |
+| Float32 | Yes | 2 | 2 | 134.72 | 74.98 | -44.3% |
+| Float32 | Yes | 2 | 3 | 111.53 | 67.55 | -39.4% |
+| Float32 | Yes | 2 | 4 | 99.95 | 48.49 | -51.5% |
+| Float32 | Yes | 2 | 5 | 200.22 | 91.86 | -54.1% |
+| Float32 | Yes | 2 | 6 | 110.40 | 77.24 | -30.0% |
+| Float32 | Yes | 2 | 7 | 200.02 | 75.08 | -62.5% |
+| Float32 | Yes | 2 | 8 | 98.86 | 65.93 | -33.3% |
+| Float32 | Yes | 4 | 2 | 133.59 | 71.55 | -46.4% |
+| Float32 | Yes | 4 | 3 | 110.43 | 66.17 | -40.1% |
+| Float32 | Yes | 4 | 4 | 98.86 | 48.55 | -50.9% |
+| Float32 | Yes | 4 | 5 | 199.86 | 91.13 | -54.4% |
+| Float32 | Yes | 4 | 6 | 109.67 | 76.46 | -30.3% |
+| Float32 | Yes | 4 | 7 | 199.76 | 74.40 | -62.8% |
+| Float32 | Yes | 4 | 8 | 98.30 | 65.35 | -33.5% |
+
 Start with **Task 0** (baseline + diff infra) followed by **Task 1** (host harness fix — cheap win). Then split:
 - **Path A (safe perf wins):** Task 2 → Task 3 → Task 4. Lands incremental 20-30% improvement with low risk over ~10 days.
 - **Path B (structural):** Task 5. Higher risk, biggest single win (30-50%).

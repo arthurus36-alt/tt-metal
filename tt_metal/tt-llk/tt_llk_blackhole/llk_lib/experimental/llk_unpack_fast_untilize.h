@@ -18,27 +18,42 @@
 namespace ckernel
 {
 
+template <bool is_fp32_dest_acc_en = false>
 inline void _llk_unpack_fast_untilize_mop_config_(const std::uint32_t unit_dim = 4)
 {
     LLK_ASSERT(unit_dim >= 2 && unit_dim <= 4, "fast_untilize unpack supports unit_dim 2, 3, or 4");
 
-    static constexpr std::uint32_t unpack_srca = TT_OP_UNPACR(SrcA, 0b1, 0, 0, 0, 1, 1, p_unpacr::RAREFYB_DISABLE, 0, 0, 0, 0, 1);
+    static constexpr std::uint32_t unpack_srca            = TT_OP_UNPACR(SrcA, 0b1, 0, 0, 0, 1, 1, p_unpacr::RAREFYB_DISABLE, 0, 0, 0, 0, 1);
+    static constexpr std::uint32_t unpack_srcb_set_dvalid = TT_OP_UNPACR_NOP(SrcB, 0, 0, p_unpacr_nop::SET_DVALID, 0, 0, 0, 0, p_unpacr_nop::UNP_ZEROSRC);
 
     const std::uint32_t outerloop     = unit_dim * 4;
     constexpr std::uint32_t innerloop = 1;
-    ckernel_template tmp(outerloop, innerloop, unpack_srca);
-    tmp.program();
+
+    if constexpr (is_fp32_dest_acc_en)
+    {
+        // Native fp32 DEST math uses ELWADD as a SrcA->DEST copy, which needs
+        // a valid zero SrcB face alongside each real SrcA face.
+        ckernel_template tmp(outerloop, innerloop, unpack_srca, unpack_srcb_set_dvalid);
+        tmp.program();
+    }
+    else
+    {
+        ckernel_template tmp(outerloop, innerloop, unpack_srca);
+        tmp.program();
+    }
 }
 
+template <bool is_fp32_dest_acc_en = false>
 inline void _llk_unpack_fast_untilize_init_(const std::uint32_t unpack_src_format, const std::uint32_t unpack_dst_format, const std::uint32_t init_unit_dim = 4)
 {
     _llk_unpack_A_init_<BroadcastType::NONE, false, EltwiseBinaryReuseDestType::NONE, false>(0, 0, FACE_R_DIM, 4, unpack_src_format, unpack_dst_format);
-    _llk_unpack_fast_untilize_mop_config_(init_unit_dim);
+    _llk_unpack_fast_untilize_mop_config_<is_fp32_dest_acc_en>(init_unit_dim);
 }
 
+template <bool is_fp32_dest_acc_en = false>
 inline void _llk_unpack_fast_untilize_reinit_unit_dim_(const std::uint32_t unit_dim)
 {
-    _llk_unpack_fast_untilize_mop_config_(unit_dim);
+    _llk_unpack_fast_untilize_mop_config_<is_fp32_dest_acc_en>(unit_dim);
 }
 
 inline void _llk_unpack_fast_untilize_block_(const std::uint32_t address, [[maybe_unused]] const std::uint32_t unit_dim = 4)

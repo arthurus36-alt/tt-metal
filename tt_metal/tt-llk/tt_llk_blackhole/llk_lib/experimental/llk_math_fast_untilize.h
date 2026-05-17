@@ -38,6 +38,16 @@ inline void _llk_math_fast_untilize_configure_addrmod_()
         .dest = {.incr = 0},
     }
         .set(ADDR_MOD_4);
+
+    // Native fp32 DEST uses ELWADD as SrcA + zero-SrcB -> DEST. ELWADD has no
+    // SrcA row immediate, so the first copy advances SrcA to row 8 and the
+    // second copy consumes that row. DEST placement still uses immediates.
+    addr_mod_t {
+        .srca = {.incr = 8},
+        .srcb = {.incr = 0},
+        .dest = {.incr = 0},
+    }
+        .set(ADDR_MOD_5);
 }
 
 template <bool is_fp32_dest_acc_en = false>
@@ -46,13 +56,6 @@ inline void _llk_math_fast_untilize_init_([[maybe_unused]] const std::uint32_t u
     // Same Dst read remap required by pack_untilize/fast_tilize paths so packer
     // STRIDED_MODE sees a 16-row stride through Dst.
     _llk_math_reconfig_remap_(true);
-
-    if constexpr (is_fp32_dest_acc_en)
-    {
-        // Keep this MVP aligned with fast_tilize: MOVA2D does not safely write
-        // the 32-bit Dst view on BH, so use the 16-bit Dst data path.
-        cfg_reg_rmw_tensix<ALU_ACC_CTRL_Fp32_enabled_RMW>(0);
-    }
 
     TTI_SETC16(CLR_DVALID_SrcA_Disable_ADDR32, 0);
     _llk_math_fast_untilize_configure_addrmod_();
@@ -66,16 +69,35 @@ inline void _llk_math_fast_untilize_copy_face_(const std::uint32_t dst_row)
     TTI_SETRWC(p_setrwc::CLR_A, 0, 0, 0, 0, p_setrwc::SET_AB);
 }
 
+inline void _llk_math_fast_untilize_copy_face_fp32_(const std::uint32_t dst_row)
+{
+    TTI_ELWADD(0, p_elwise::DEST_ACCUM_DIS, p_elwise::SRCB_NO_BCAST, ADDR_MOD_5, dst_row);
+    TTI_ELWADD(0, p_elwise::DEST_ACCUM_DIS, p_elwise::SRCB_NO_BCAST, ADDR_MOD_5, dst_row + 8);
+
+    TTI_SETRWC(p_setrwc::CLR_AB, 0, 0, 0, 0, p_setrwc::SET_AB);
+}
+
+template <bool is_fp32_dest_acc_en = false>
 inline void _llk_math_fast_untilize_copy_tile_(const std::uint32_t tile_index)
 {
     const std::uint32_t top_row    = tile_index * 32;
     const std::uint32_t bottom_row = 128 + tile_index * 32;
 
     // The unpacker presents each tile as F2, F3, F0, F1.
-    _llk_math_fast_untilize_copy_face_(bottom_row);
-    _llk_math_fast_untilize_copy_face_(bottom_row + 16);
-    _llk_math_fast_untilize_copy_face_(top_row);
-    _llk_math_fast_untilize_copy_face_(top_row + 16);
+    if constexpr (is_fp32_dest_acc_en)
+    {
+        _llk_math_fast_untilize_copy_face_fp32_(bottom_row);
+        _llk_math_fast_untilize_copy_face_fp32_(bottom_row + 16);
+        _llk_math_fast_untilize_copy_face_fp32_(top_row);
+        _llk_math_fast_untilize_copy_face_fp32_(top_row + 16);
+    }
+    else
+    {
+        _llk_math_fast_untilize_copy_face_(bottom_row);
+        _llk_math_fast_untilize_copy_face_(bottom_row + 16);
+        _llk_math_fast_untilize_copy_face_(top_row);
+        _llk_math_fast_untilize_copy_face_(top_row + 16);
+    }
 }
 
 template <bool is_fp32_dest_acc_en = false>
@@ -85,22 +107,21 @@ inline void _llk_math_fast_untilize_block_(
     [[maybe_unused]] const std::uint32_t block_ct_dim = 4,
     [[maybe_unused]] const std::uint32_t num_faces    = 4)
 {
-    static_assert(!is_fp32_dest_acc_en, "T5 fast-untilize MVP only supports 16-bit Dst");
     LLK_ASSERT(block_ct_dim >= 2 && block_ct_dim <= 4, "T5 fast-untilize supports block_ct_dim 2, 3, or 4");
     LLK_ASSERT(num_faces == 4, "T5 fast-untilize MVP only supports four-face tiles");
 
     math::set_dst_write_addr<DstTileShape::Tile32x32, UnpackDestination::SrcRegs>(dst_index);
     TTI_SETRWC(p_setrwc::CLR_NONE, 0, 0, 0, 0, p_setrwc::SET_ABD_F);
 
-    _llk_math_fast_untilize_copy_tile_(0);
-    _llk_math_fast_untilize_copy_tile_(1);
+    _llk_math_fast_untilize_copy_tile_<is_fp32_dest_acc_en>(0);
+    _llk_math_fast_untilize_copy_tile_<is_fp32_dest_acc_en>(1);
     if (block_ct_dim >= 3)
     {
-        _llk_math_fast_untilize_copy_tile_(2);
+        _llk_math_fast_untilize_copy_tile_<is_fp32_dest_acc_en>(2);
     }
     if (block_ct_dim >= 4)
     {
-        _llk_math_fast_untilize_copy_tile_(3);
+        _llk_math_fast_untilize_copy_tile_<is_fp32_dest_acc_en>(3);
     }
 
     math::clear_dst_reg_addr();
@@ -109,12 +130,6 @@ inline void _llk_math_fast_untilize_block_(
 template <bool is_fp32_dest_acc_en>
 inline void _llk_math_fast_untilize_uninit_([[maybe_unused]] const std::uint32_t unpack_dst_format)
 {
-    if constexpr (is_fp32_dest_acc_en)
-    {
-        TTI_STALLWAIT(p_stall::STALL_CFG, p_stall::MATH | p_stall::WAIT_SFPU);
-        cfg_reg_rmw_tensix<ALU_ACC_CTRL_Fp32_enabled_RMW>(1);
-    }
-
     addr_mod_t {
         .srca = {.incr = 8},
         .srcb = {.incr = 0},

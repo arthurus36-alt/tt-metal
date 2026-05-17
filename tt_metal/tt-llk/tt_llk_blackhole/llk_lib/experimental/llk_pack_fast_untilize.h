@@ -4,7 +4,8 @@
 
 // BH Fast-Untilize Pack - T5-B (tt-metal#42048 + #42049).
 //
-// Read math DEST layout (4 tiles, ct=4 FP16) emitted by `_llk_math_fast_untilize_*`:
+// Read math DEST layout (4 tiles, ct=4; 16-bit or native fp32 DEST) emitted by
+// `_llk_math_fast_untilize_*`:
 //   Dst rows   0..63:  t0.F0 | t0.F1 | t1.F0 | t1.F1
 //   Dst rows  64..127: t2.F0 | t2.F1 | t3.F0 | t3.F1
 //   Dst rows 128..191: t0.F2 | t0.F3 | t1.F2 | t1.F3
@@ -42,8 +43,8 @@
 // phase source half is selected by reprogramming the active pack DEST target
 // offset: active_half + 128 for top rows, then active_half + 0 for bottom rows.
 //
-// DOMAIN: unit_dim=2/3/4, num_faces=4, FP16 / bf16 output. Other shapes fall back to legacy
-// `_llk_pack_untilize_` (T2+T3 wins still apply).
+// DOMAIN: unit_dim=2/3/4, num_faces=4, SyncHalf, bf16 and Float32 same-format
+// output. Other shapes fall back to legacy `_llk_pack_untilize_` (T2+T3 wins still apply).
 
 #pragma once
 
@@ -240,20 +241,10 @@ inline void _llk_pack_fast_untilize_strided_direct_row_(const std::uint32_t unit
 }
 
 template <DstSync Dst, bool is_fp32_dest_acc_en = false, std::uint32_t block_ct_dim = 4, std::uint32_t full_ct_dim = block_ct_dim>
-inline void _llk_pack_fast_untilize_init_(const std::uint32_t pack_src_format, const std::uint32_t pack_dst_format, const std::uint32_t num_faces = 4)
+inline void _llk_pack_fast_untilize_init_(
+    const std::uint32_t pack_src_format, const std::uint32_t pack_dst_format, [[maybe_unused]] const std::uint32_t num_faces = 4)
 {
     static_assert(block_ct_dim >= 2 && block_ct_dim <= 4, "T5-B fast untilize supports block_ct_dim 2, 3, or 4");
-
-    if constexpr (is_fp32_dest_acc_en)
-    {
-        // Mirror fast_tilize init: reconfig pack_src to bf16-compat + Read_32b=0
-        // for stride-16 stepping through DEST.
-        constexpr std::uint32_t compat_src = ckernel::to_underlying(DataFormat::Float16_b);
-        const std::uint32_t tile_size      = SCALE_DATUM_SIZE(pack_dst_format, TILE_C_DIM * TILE_R_DIM);
-        reconfig_packer_data_format<is_fp32_dest_acc_en>(compat_src, pack_dst_format, tile_size, FACE_R_DIM, TILE_C_DIM, num_faces, /*partial_face=*/false);
-        TTI_STALLWAIT(p_stall::STALL_CFG, p_stall::PACK);
-        cfg_reg_rmw_tensix<PCK_DEST_RD_CTRL_Read_32b_data_RMW>(0);
-    }
 
     TTI_SETDMAREG(0, 0x000, 0, LO_16(p_gpr_pack::DEST_OFFSET_LO + 0));
     TTI_SETDMAREG(0, DEST_REGISTER_HALF_SIZE, 0, LO_16(p_gpr_pack::DEST_OFFSET_HI + 0));
@@ -269,10 +260,9 @@ inline void _llk_pack_fast_untilize_init_(const std::uint32_t pack_src_format, c
     TTI_NOP;
 
     // Strides for our row/block/phase advance scheme.
-    const std::uint32_t effective_src = is_fp32_dest_acc_en ? ckernel::to_underlying(DataFormat::Float16_b) : pack_src_format;
-    const std::uint32_t x_stride      = (effective_src & 0x3) == ckernel::to_underlying(DataFormat::Float32)   ? 4
-                                        : (effective_src & 0x3) == ckernel::to_underlying(DataFormat::Float16) ? 2
-                                                                                                               : 1;
+    const std::uint32_t x_stride = (pack_src_format & 0x3) == ckernel::to_underlying(DataFormat::Float32)   ? 4
+                                   : (pack_src_format & 0x3) == ckernel::to_underlying(DataFormat::Float16) ? 2
+                                                                                                            : 1;
     // y_stride: 1 face-row of 16 datums per y+=1
     const std::uint32_t y_stride = FACE_C_DIM * x_stride;
     // z_stride: 64 face-rows per z+=1 (one block: 4 face-tile-groups of 16 rows)
@@ -387,13 +377,9 @@ inline void _llk_pack_fast_untilize_block_strided_(
 }
 
 template <DstSync Dst, bool is_fp32_dest_acc_en>
-inline void _llk_pack_fast_untilize_uninit_(const std::uint32_t pack_dst_format, const std::uint32_t pack_src_format = (std::uint32_t)DataFormat::Float16_b)
+inline void _llk_pack_fast_untilize_uninit_(
+    [[maybe_unused]] const std::uint32_t pack_dst_format, const std::uint32_t pack_src_format = (std::uint32_t)DataFormat::Float16_b)
 {
-    if constexpr (is_fp32_dest_acc_en)
-    {
-        const std::uint32_t tile_size = SCALE_DATUM_SIZE(pack_dst_format, TILE_C_DIM * TILE_R_DIM);
-        reconfig_packer_data_format<is_fp32_dest_acc_en>(pack_src_format, pack_dst_format, tile_size, FACE_R_DIM, TILE_C_DIM, 4, /*partial_face=*/false);
-    }
     set_packer_strides<PackMode::Default>(pack_src_format, TILE_C_DIM);
     TTI_SETADCXX(p_setadc::PAC, FACE_C_DIM - 1, 0x0);
     _llk_pack_init_<PackMode::Default, false, false>(FACE_R_DIM, TILE_C_DIM, 4, 1);
