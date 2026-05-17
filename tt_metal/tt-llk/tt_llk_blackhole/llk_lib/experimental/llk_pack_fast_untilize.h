@@ -252,13 +252,6 @@ inline void _llk_pack_fast_untilize_init_(const std::uint32_t pack_src_format, c
 
     TTI_SETADCXX(p_setadc::PAC, FACE_C_DIM - 1, 0x0);
 
-    const std::uint32_t output_row_stride = SCALE_DATUM_SIZE(pack_dst_format, full_ct_dim * TILE_C_DIM);
-    TT_SETDMAREG(0, LOWER_HALFWORD(output_row_stride / 16), 0, LO_16(p_gpr_pack::OUTPUT_ADDR_OFFSET));
-    TT_SETDMAREG(0, UPPER_HALFWORD(output_row_stride / 16), 0, HI_16(p_gpr_pack::OUTPUT_ADDR_OFFSET));
-    TTI_STALLWAIT(p_stall::STALL_CFG, p_stall::THCON);
-    TTI_WRCFG(p_gpr_pack::OUTPUT_ADDR_OFFSET, 0, SCRATCH_SEC2_val_ADDR32);
-    TTI_NOP;
-
     // Strides for our row/block/phase advance scheme.
     const std::uint32_t x_stride = (pack_src_format & 0x3) == ckernel::to_underlying(DataFormat::Float32)   ? 4
                                    : (pack_src_format & 0x3) == ckernel::to_underlying(DataFormat::Float16) ? 2
@@ -281,6 +274,12 @@ inline void _llk_pack_fast_untilize_init_(const std::uint32_t pack_src_format, c
     _llk_pack_fast_untilize_configure_addrmod_();
     if constexpr (full_ct_dim > block_ct_dim)
     {
+        const std::uint32_t output_row_stride = SCALE_DATUM_SIZE(pack_dst_format, full_ct_dim * TILE_C_DIM);
+        TT_SETDMAREG(0, LOWER_HALFWORD(output_row_stride / 16), 0, LO_16(p_gpr_pack::OUTPUT_ADDR_OFFSET));
+        TT_SETDMAREG(0, UPPER_HALFWORD(output_row_stride / 16), 0, HI_16(p_gpr_pack::OUTPUT_ADDR_OFFSET));
+        TTI_STALLWAIT(p_stall::STALL_CFG, p_stall::THCON);
+        TTI_WRCFG(p_gpr_pack::OUTPUT_ADDR_OFFSET, 0, SCRATCH_SEC2_val_ADDR32);
+        TTI_NOP;
         _llk_pack_fast_untilize_load_row_advance_replay_();
     }
 }
