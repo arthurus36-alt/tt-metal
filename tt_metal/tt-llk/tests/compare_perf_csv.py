@@ -34,9 +34,21 @@ KEY_COLS = (
     "marker",
 )
 
+DETAIL_LABEL_COLS = {
+    "formats.input_A",
+    "formats.output",
+    "full_rt_dim",
+    "full_ct_dim",
+    "block_ct_dim",
+}
+
 
 def format_key(key_cols, key):
     return "/".join(f"{k}={v}" for k, v in zip(key_cols, key))
+
+
+def detail_label(key_cols, key):
+    return "/".join(f"{k}={v}" for k, v in zip(key_cols, key) if k in DETAIL_LABEL_COLS)
 
 
 def load(path, key_cols):
@@ -67,6 +79,10 @@ def mean_columns(row):
 def fmt_pct(p):
     sign = "+" if p > 0 else ""
     return f"{sign}{p:6.2f}%"
+
+
+def run_col_name(col):
+    return col.replace("mean(", "").rstrip(")")
 
 
 def main():
@@ -158,7 +174,7 @@ def main():
         d = deltas[col]
         if not d:
             continue
-        col_name = col.replace("mean(", "").rstrip(")")
+        col_name = run_col_name(col)
         print(
             f"{col_name:<24} "
             f"{min(d):>7.2f}% {sum(d)/len(d):>7.2f}% {max(d):>7.2f}% "
@@ -171,49 +187,27 @@ def main():
         if not items:
             continue
         any_regress = True
-        col_name = col.replace("mean(", "").rstrip(")")
+        col_name = run_col_name(col)
         print(f"\n--- Regressions in {col_name} (>{args.gate}%) ---")
         for key, bv, cv, pct in sorted(items, key=lambda x: -x[3])[:20]:
-            label = "/".join(
-                f"{k}={v}"
-                for k, v in zip(key_cols, key)
-                if k
-                in (
-                    "formats.input_A",
-                    "formats.output",
-                    "full_rt_dim",
-                    "full_ct_dim",
-                    "block_ct_dim",
-                )
-            )
+            label = detail_label(key_cols, key)
             print(f"  {fmt_pct(pct)}  base={bv:8.0f}  cand={cv:8.0f}  {label}")
 
     # Top wins (informational)
     for col, items in wins.items():
         if not items:
             continue
-        col_name = col.replace("mean(", "").rstrip(")")
+        col_name = run_col_name(col)
         print(f"\n--- Top wins in {col_name} (<-{args.gate}%) ---")
         for key, bv, cv, pct in sorted(items, key=lambda x: x[3])[:10]:
-            label = "/".join(
-                f"{k}={v}"
-                for k, v in zip(key_cols, key)
-                if k
-                in (
-                    "formats.input_A",
-                    "formats.output",
-                    "full_rt_dim",
-                    "full_ct_dim",
-                    "block_ct_dim",
-                )
-            )
+            label = detail_label(key_cols, key)
             print(f"  {fmt_pct(pct)}  base={bv:8.0f}  cand={cv:8.0f}  {label}")
 
     if args.verbose:
         print(f"\n--- All variants ({len(rows_out)} rows) ---")
         for key, col, bv, cv, pct, tile_cnt in rows_out:
             label = format_key(key_cols, key)
-            col_name = col.replace("mean(", "").rstrip(")")
+            col_name = run_col_name(col)
             print(
                 f"  {col_name:<24} {fmt_pct(pct)}  base={bv:8.0f}  cand={cv:8.0f}  {label}"
             )
