@@ -454,14 +454,25 @@ def quantize_mx_tensor_chunked(
 
 
 def quantize_input_to_unpack_format(
-    operand: torch.Tensor, input_format: Optional[DataFormat]
+    operand: torch.Tensor,
+    input_format: Optional[DataFormat],
+    *,
+    all_mx_formats: bool = False,
 ) -> torch.Tensor:
+    """
+    Quantize input stimuli to match the values visible after hardware unpack.
+
+    Some callers only model MXFP4 today; keep that as the default and let broader
+    MX golden paths opt in explicitly.
+    """
     if input_format == DataFormat.Bfp4_b:
         return _bfp4b_to_float16b(operand)
     if input_format == DataFormat.Bfp8_b:
         return _bfp8b_to_float16b(operand)
-    if input_format == DataFormat.MxFp4:
-        return quantize_mx_tensor_chunked(operand, input_format)
+    if input_format is not None and input_format.is_mx_format():
+        if all_mx_formats or input_format == DataFormat.MxFp4:
+            return quantize_mx_tensor_chunked(operand, input_format)
+        return operand
     return operand
 
 
@@ -1416,13 +1427,9 @@ class DataCopyGolden:
         torch_format = format_dict[data_format]
 
         # Quantize input to match what hardware actually sees after unpack from L1.
-        if input_format is not None:
-            if input_format == DataFormat.Bfp4_b:
-                operand1 = _bfp4b_to_float16b(operand1)
-            elif input_format == DataFormat.Bfp8_b:
-                operand1 = _bfp8b_to_float16b(operand1)
-            elif input_format.is_mx_format():
-                operand1 = quantize_mx_tensor_chunked(operand1, input_format)
+        operand1 = quantize_input_to_unpack_format(
+            operand1, input_format, all_mx_formats=True
+        )
 
         height, width = input_dimensions[0], input_dimensions[1]
 
@@ -2520,14 +2527,10 @@ class ReduceGolden:
         if reduce_dim not in self.dim_handlers:
             raise ValueError(f"Unsupported reduce dimension: {reduce_dim}")
 
-        # Quantize input to match what hardware actually unpacks from L1 memory
-        if input_format == DataFormat.Bfp4_b:
-            operand = _bfp4b_to_float16b(operand)
-        elif input_format == DataFormat.Bfp8_b:
-            operand = _bfp8b_to_float16b(operand)
-        elif input_format is not None and input_format.is_mx_format():
-            # MX formats need to be quantized before reduce
-            operand = quantize_mx_tensor_chunked(operand, input_format)
+        # Quantize input to match what hardware actually unpacks from L1 memory.
+        operand = quantize_input_to_unpack_format(
+            operand, input_format, all_mx_formats=True
+        )
 
         if reduce_to_one:
             # Accumulate all tiles into a single result
