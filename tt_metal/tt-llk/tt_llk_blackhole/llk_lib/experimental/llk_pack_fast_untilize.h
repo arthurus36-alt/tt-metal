@@ -62,6 +62,9 @@ namespace ckernel
 
 constexpr std::uint32_t FAST_UNTILIZE_ROW_ADVANCE_REPLAY_OFFSET = ckernel::packer::replay_buf_offset;
 constexpr std::uint32_t FAST_UNTILIZE_ROW_ADVANCE_REPLAY_LEN    = 2;
+constexpr std::uint32_t FAST_UNTILIZE_PHASE_ROWS                = FACE_R_DIM;
+constexpr std::uint32_t FAST_UNTILIZE_BLOCK_STRIDE_ROWS         = 4 * FAST_UNTILIZE_PHASE_ROWS;
+constexpr std::uint32_t FAST_UNTILIZE_PHASE_PAIR_STRIDE_ROWS    = 2 * FAST_UNTILIZE_BLOCK_STRIDE_ROWS;
 
 inline void _llk_pack_fast_untilize_configure_addrmod_()
 {
@@ -100,8 +103,8 @@ inline void _llk_pack_fast_untilize_mop_config_(const std::uint32_t unit_dim = 4
 {
     LLK_ASSERT(unit_dim >= 2 && unit_dim <= 4, "fast_untilize pack supports unit_dim 2, 3, or 4");
 
-    constexpr std::uint32_t MOP_OUTER_LOOP = 16; // face_r_dim rows per phase
-    constexpr std::uint32_t MOP_INNER_LOOP = 1;  // one PACR pair per strip row
+    constexpr std::uint32_t MOP_OUTER_LOOP = FAST_UNTILIZE_PHASE_ROWS;
+    constexpr std::uint32_t MOP_INNER_LOOP = 1; // one PACR pair per strip row
 
     if (unit_dim == 2)
     {
@@ -138,7 +141,7 @@ inline void _llk_pack_fast_untilize_strided_mop_config_(const std::uint32_t unit
 {
     LLK_ASSERT(unit_dim >= 2 && unit_dim <= 4, "fast_untilize strided pack supports unit_dim 2, 3, or 4");
 
-    constexpr std::uint32_t MOP_OUTER_LOOP = 16;
+    constexpr std::uint32_t MOP_OUTER_LOOP = FAST_UNTILIZE_PHASE_ROWS;
     constexpr std::uint32_t MOP_INNER_LOOP = 1;
 
     if (unit_dim == 2)
@@ -259,10 +262,10 @@ inline void _llk_pack_fast_untilize_init_(const std::uint32_t pack_src_format, c
                                                                                                             : 1;
     // y_stride: 1 face-row of 16 datums per y+=1
     const std::uint32_t y_stride = FACE_C_DIM * x_stride;
-    // z_stride: 64 face-rows per z+=1 (one block: 4 face-tile-groups of 16 rows)
-    const std::uint32_t z_stride = 64 * FACE_C_DIM * x_stride;
+    // z_stride: one block of four face-tile-groups per z+=1.
+    const std::uint32_t z_stride = FAST_UNTILIZE_BLOCK_STRIDE_ROWS * y_stride;
     // w_stride: retained for consistency with the pack address generator setup.
-    const std::uint32_t w_stride = 128 * FACE_C_DIM * x_stride;
+    const std::uint32_t w_stride = FAST_UNTILIZE_PHASE_PAIR_STRIDE_ROWS * y_stride;
 
     TT_SETDMAREG(0, LOWER_HALFWORD(y_stride << PCK0_ADDR_CTRL_XY_REG_0_Ystride_SHAMT), 0, LO_16(p_gpr_pack::TMP0));
     TT_SETDMAREG(0, UPPER_HALFWORD(y_stride << PCK0_ADDR_CTRL_XY_REG_0_Ystride_SHAMT), 0, HI_16(p_gpr_pack::TMP0));
