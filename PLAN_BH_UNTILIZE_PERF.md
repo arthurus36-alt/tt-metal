@@ -995,4 +995,26 @@ Working conclusion:
 - Yes, the MOP sequencing path had real headroom. Most of it came from avoiding the redundant phase sync and full MOP rebuild; the remaining cache optimization is incremental.
 - Do not treat further hot pack-loop refactors as cleanup. Continue only as measured perf experiments with focused contiguous-path perf first, then the full fast-vs-legacy gate.
 
+### High-risk MOP optimization backlog
+
+These are explicitly perf experiments, not cleanup. Each item needs an isolated commit, a kill switch when practical, focused accuracy/perf first, and then the full fast-vs-legacy gate before it is allowed to stay.
+
+| idea | likely target | potential win | main risk |
+|:---|:---|:---|:---|
+| Shape-gated ch1 output counters for legal output strides | `ct=4/8`-style strides that are multiples of 256B | high on eligible shapes | BH masks ch1 strides to 256B granularity; ungated use corrupts rows for smaller/non-aligned strides. |
+| Further compress row-strided `ct>4` MOP/replay | wide rows, especially `ct=5..8` | medium/high | Previous wide path had silicon-only `mop_sync` liveness failures. Long-loop pack-isolate must be the first gate. |
+| Hoist or reuse destination programming across repeated same-width chunks | repeated chunks / repeated rows | medium | Stale `L1_Dest_addr` or phase state can produce plausible but wrong row-major output. |
+| Replace row-close `CFGSHIFTMASK` with `RMWCIB` or manual cfg patching | strided pack row advance | medium | Config-pipeline ordering is touchy; simulator may not catch timing hazards. |
+| Cache/reuse strided MOP across more loop/row boundaries | wide rows | low/medium | Stale `unit_dim`, row stride, or end-op state can break decomposed rows. |
+| Padded 4-interface output for `unit_dim=2/3` with discarded lanes | narrow tails | medium | Extra-lane overflow/guard correctness is fragile and easy to miss without sentinels. |
+| Fuse top/bottom phases into one MOP run | all fast pack paths | medium | DEST phase selection already proved fragile; wrong offset latching silently corrupts output or hangs. |
+| Remove or relax phase `STALLWAIT`/`mop_sync` sequencing | all fast pack paths | medium | Highest chance of recreating silicon-only packer liveness failures. |
+| CFG bank ping-pong for pack config/MOP state | broad pack config overhead | low/medium | Bigger LLK-state blast radius; touches shared config-bank assumptions. |
+
+Preferred order if we take more perf risk:
+1. Shape-gated ch1 output counters, because the hardware constraint is known and can be guarded.
+2. Row-strided `ct>4` MOP/replay compression, starting with `ct=5/8`, `loop_factor>=16`, `PACK_ISOLATE`.
+3. Destination-programming hoist for repeated same-width chunks, with guard-sentinel accuracy first.
+4. Phase fusion or sync removal only after the above are exhausted.
+
 Current next action: promotion from the experimental test path into the production untilize path. Keep the fast path gated by the existing BH/format/dest constraints, preserve legacy fallback from day one, and use the full `test_fast_untilize.py` plus `perf_fast_untilize.py`/`perf_fast_untilize_legacy_compare.py` matrix as the merge gate.
