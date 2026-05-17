@@ -839,11 +839,23 @@ Pre-stage next iter's config in inactive bank while current iter is packing. Eli
   - `8906dd32197` Gate BH fast untilize row-stride scratch setup.
   - `654bc667d17` Use `pytest.fail` for fast untilize mismatches.
   - `3e71ade886c` Refresh fast untilize experimental wording.
+  - `873e7de362a` Clean up fast untilize comments and golden helper.
+  - `77d7011a9d9` Share unpack input quantization in golden generators.
+  - `2eea5540289` Centralize fast untilize test constants.
+  - `13f1c215329` Simplify perf comparison reporting helpers.
+  - `5d78484c046` Name fast untilize face layout constants.
+  - `f5c9ee980b9` Simplify fast untilize phase selection.
+  - `9d4d34cfea6` Name fast untilize pack stride constants.
+  - `4bf791d0774` Share fast untilize pack test loop.
+  - `871f18c143c` Clarify fast untilize pack datum stride.
+  - `9d5eb9f89b7` Drop unused perf CSV tile count plumbing.
 - Current validation after the latest code/comment cleanup:
-  - Accuracy: `python3 -m pytest -q tt_metal/tt-llk/tests/python_tests/test_fast_untilize.py` -> `189 passed in 20.81s`.
+  - Accuracy: `python3 -m pytest -q tt_metal/tt-llk/tests/python_tests/test_fast_untilize.py` -> `567 passed in 72.64s`.
   - Perf: `python3 -m pytest -q tt_metal/tt-llk/tests/python_tests/perf_fast_untilize.py tt_metal/tt-llk/tests/python_tests/perf_fast_untilize_legacy_compare.py` -> `378 passed in 121.02s`.
   - Fast-vs-saved CSV gate: no `TILE_LOOP` regressions >2%; max deltas were `L1_TO_L1 +0.16%`, `UNPACK_ISOLATE +0.40%`, `MATH_ISOLATE +0.85%`, `PACK_ISOLATE +0.09%`.
   - Fast-vs-legacy apples-to-apples: `L1_TO_L1` wins `189/189`; `PACK_ISOLATE` wins `188/189` with max non-win `+0.98%`.
+  - Latest focused C++ cleanup gate: two representative accuracy cases passed; three representative perf cases passed; CSV compare vs prior cleanup showed no >2% regressions, with only `MATH_ISOLATE` noise up to `+0.03%`.
+  - Latest perf helper cleanup gate: `python_env/bin/python3 -m pytest -q tt_metal/tt-llk/tests/test_compare_perf_csv.py` -> `4 passed in 0.11s`; verbose CSV compare output remained semantically unchanged.
 - Cleanup lesson: extracting the duplicated pack row/chunk loop in `fast_untilize_test.cpp` into inline helpers was functionally correct but regressed small `ct<=3` `PACK_ISOLATE` cases by up to ~23%. Keep that measured hot loop spelled out unless a future refactor proves codegen parity.
 
 ### 2026-05-17 fp32 DEST status
@@ -950,4 +962,4 @@ Steady-state (`loop_factor=16`) `L1_TO_L1` comparison:
 | Float32 | Yes | 4 | 7 | 199.76 | 74.40 | -62.8% |
 | Float32 | Yes | 4 | 8 | 98.30 | 65.35 | -33.5% |
 
-Current next action: continue only small cleanup items that preserve the perf CSV gate. Avoid broad C++ helper refactors in the measured pack loop unless they are backed by focused `ct<=3` perf before the full sweep. Next integration work remains promotion from the experimental test path into the production untilize path, with the current fast-vs-legacy CSV as the merge gate.
+Current next action: stop opportunistic cleanup unless a new issue is found in review. The remaining obvious refactors are broad C++ helper extractions in the measured pack loop or pack MOP sequencing, so they should only be attempted with focused `ct<=3` perf first and the full fast-vs-legacy CSV as the merge gate. Next integration work remains promotion from the experimental test path into the production untilize path.
