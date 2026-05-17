@@ -250,37 +250,6 @@ void run_kernel(RUNTIME_PARAMETERS params)
         {
             return;
         }
-        else if constexpr (PERF_RUN_TYPE == PerfRunType::PACK_ISOLATE)
-        {
-            std::uint32_t prev_pack_unit_dim = 0;
-            for (std::uint32_t loop = 0; loop < LOOP_FACTOR; loop++)
-            {
-                for (std::uint32_t rt = 0; rt < FULL_RT_DIM; rt++)
-                {
-                    const std::uint32_t tile_row_offset_16B = SCALE_DATUM_SIZE(formats.pack_dst, rt * FULL_CT_DIM * TILE_R_DIM * TILE_C_DIM) / 16;
-                    const std::uint32_t tile_row_address    = L1_ADDRESS(buffer_Res[0]) + tile_row_offset_16B;
-                    std::uint32_t chunk_col                 = 0;
-                    for (std::uint32_t u = 0; u < units_per_row; u++)
-                    {
-                        const std::uint32_t unit_dim         = unit_dims[u];
-                        const std::uint32_t chunk_offset_16B = SCALE_DATUM_SIZE(formats.pack_dst, chunk_col * TILE_C_DIM) / 16;
-                        const std::uint32_t chunk_address    = tile_row_address + chunk_offset_16B;
-                        if constexpr (FULL_CT_DIM <= FAST_UNTILIZE_MAX_UNIT_DIM)
-                        {
-                            _llk_pack_fast_untilize_block_<FAST_UNTILIZE_MAX_UNIT_DIM, DstSync::SyncHalf>(chunk_address, unit_dim);
-                        }
-                        else
-                        {
-                            _llk_pack_fast_untilize_block_strided_<FAST_UNTILIZE_MAX_UNIT_DIM, FULL_CT_DIM, DstSync::SyncHalf>(
-                                chunk_address, unit_dim, prev_pack_unit_dim);
-                        }
-                        chunk_col += unit_dim;
-                    }
-                }
-            }
-            PROFILER_SYNC();
-            return;
-        }
 
         std::uint32_t prev_pack_unit_dim = 0;
         for (std::uint32_t loop = 0; loop < LOOP_FACTOR; loop++)
@@ -296,7 +265,10 @@ void run_kernel(RUNTIME_PARAMETERS params)
                     const std::uint32_t chunk_offset_16B = SCALE_DATUM_SIZE(formats.pack_dst, chunk_col * TILE_C_DIM) / 16;
                     const std::uint32_t chunk_address    = tile_row_address + chunk_offset_16B;
 
-                    _llk_packer_wait_for_math_done_();
+                    if constexpr (PERF_RUN_TYPE == PerfRunType::L1_TO_L1)
+                    {
+                        _llk_packer_wait_for_math_done_();
+                    }
                     if constexpr (FULL_CT_DIM <= FAST_UNTILIZE_MAX_UNIT_DIM)
                     {
                         _llk_pack_fast_untilize_block_<FAST_UNTILIZE_MAX_UNIT_DIM, DstSync::SyncHalf>(chunk_address, unit_dim);
@@ -306,12 +278,19 @@ void run_kernel(RUNTIME_PARAMETERS params)
                         _llk_pack_fast_untilize_block_strided_<FAST_UNTILIZE_MAX_UNIT_DIM, FULL_CT_DIM, DstSync::SyncHalf>(
                             chunk_address, unit_dim, prev_pack_unit_dim);
                     }
-                    _llk_pack_dest_section_done_<DstSync::SyncHalf, is_fp32_dest_acc_en>();
+                    if constexpr (PERF_RUN_TYPE == PerfRunType::L1_TO_L1)
+                    {
+                        _llk_pack_dest_section_done_<DstSync::SyncHalf, is_fp32_dest_acc_en>();
+                    }
                     chunk_col += unit_dim;
                 }
             }
         }
         PROFILER_SYNC();
+        if constexpr (PERF_RUN_TYPE == PerfRunType::PACK_ISOLATE)
+        {
+            return;
+        }
     }
     {
         ZONE_SCOPED("UNINIT")
