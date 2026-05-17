@@ -241,10 +241,10 @@ inline void _llk_pack_fast_untilize_strided_direct_row_(const std::uint32_t unit
 }
 
 template <DstSync Dst, bool is_fp32_dest_acc_en = false, std::uint32_t block_ct_dim = 4, std::uint32_t full_ct_dim = block_ct_dim>
-inline void _llk_pack_fast_untilize_init_(
-    const std::uint32_t pack_src_format, const std::uint32_t pack_dst_format, [[maybe_unused]] const std::uint32_t num_faces = 4)
+inline void _llk_pack_fast_untilize_init_(const std::uint32_t pack_src_format, const std::uint32_t pack_dst_format, const std::uint32_t num_faces = 4)
 {
     static_assert(block_ct_dim >= 2 && block_ct_dim <= 4, "T5-B fast untilize supports block_ct_dim 2, 3, or 4");
+    LLK_ASSERT(num_faces == 4, "fast_untilize pack only supports four-face tiles");
 
     TTI_SETDMAREG(0, 0x000, 0, LO_16(p_gpr_pack::DEST_OFFSET_LO + 0));
     TTI_SETDMAREG(0, DEST_REGISTER_HALF_SIZE, 0, LO_16(p_gpr_pack::DEST_OFFSET_HI + 0));
@@ -303,11 +303,11 @@ inline void _llk_pack_fast_untilize_select_phase_()
 // One call processes one block of block_ct_dim=4 tiles.
 // Output: 4 tiles' worth of RM strip starting at `address` (in 16B units).
 template <std::uint32_t block_ct_dim = 4, DstSync Dst = DstSync::SyncHalf>
-inline void _llk_pack_fast_untilize_block_(
-    const std::uint32_t address, const std::uint32_t unit_dim = block_ct_dim, [[maybe_unused]] const std::uint32_t num_faces = 4)
+inline void _llk_pack_fast_untilize_block_(const std::uint32_t address, const std::uint32_t unit_dim = block_ct_dim, const std::uint32_t num_faces = 4)
 {
     static_assert(block_ct_dim >= 2 && block_ct_dim <= 4, "T5-B fast untilize supports block_ct_dim 2, 3, or 4");
     LLK_ASSERT(unit_dim >= 2 && unit_dim <= block_ct_dim, "fast_untilize pack unit_dim must be in [2, block_ct_dim]");
+    LLK_ASSERT(num_faces == 4, "fast_untilize pack only supports four-face tiles");
 
     program_packer_destination(address);
 
@@ -331,11 +331,20 @@ inline void _llk_pack_fast_untilize_block_(
 // Output address points at this chunk's row-0 column in the row-major tensor.
 template <std::uint32_t block_ct_dim = 4, std::uint32_t full_ct_dim = block_ct_dim, DstSync Dst = DstSync::SyncHalf>
 inline void _llk_pack_fast_untilize_block_strided_(
-    const std::uint32_t address, const std::uint32_t unit_dim = block_ct_dim, [[maybe_unused]] const std::uint32_t num_faces = 4)
+    const std::uint32_t address, const std::uint32_t unit_dim, [[maybe_unused]] std::uint32_t& prev_unit_dim, const std::uint32_t num_faces = 4)
 {
     static_assert(block_ct_dim >= 2 && block_ct_dim <= 4, "T5-B fast untilize strided path supports block_ct_dim 2, 3, or 4");
     static_assert(full_ct_dim > block_ct_dim, "Use the contiguous fast_untilize block when the chunk is the full row");
     LLK_ASSERT(unit_dim >= 2 && unit_dim <= block_ct_dim, "fast_untilize pack unit_dim must be in [2, block_ct_dim]");
+    LLK_ASSERT(num_faces == 4, "fast_untilize pack only supports four-face tiles");
+
+#if FAST_UNTILIZE_STRIDED_MOP_REPLAY
+    if (unit_dim != prev_unit_dim)
+    {
+        _llk_pack_fast_untilize_strided_mop_config_(unit_dim);
+        prev_unit_dim = unit_dim;
+    }
+#endif
 
     program_packer_destination(address);
 

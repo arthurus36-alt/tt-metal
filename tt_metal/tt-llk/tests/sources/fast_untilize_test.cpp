@@ -257,14 +257,8 @@ void run_kernel(RUNTIME_PARAMETERS params)
                         }
                         else
                         {
-#if FAST_UNTILIZE_STRIDED_MOP_REPLAY
-                            if (unit_dim != prev_pack_unit_dim)
-                            {
-                                _llk_pack_fast_untilize_strided_mop_config_(unit_dim);
-                                prev_pack_unit_dim = unit_dim;
-                            }
-#endif
-                            _llk_pack_fast_untilize_block_strided_<FAST_UNTILIZE_MAX_UNIT_DIM, FULL_CT_DIM, DstSync::SyncHalf>(chunk_address, unit_dim);
+                            _llk_pack_fast_untilize_block_strided_<FAST_UNTILIZE_MAX_UNIT_DIM, FULL_CT_DIM, DstSync::SyncHalf>(
+                                chunk_address, unit_dim, prev_pack_unit_dim);
                         }
                         chunk_col += unit_dim;
                     }
@@ -295,14 +289,8 @@ void run_kernel(RUNTIME_PARAMETERS params)
                     }
                     else
                     {
-#if FAST_UNTILIZE_STRIDED_MOP_REPLAY
-                        if (unit_dim != prev_pack_unit_dim)
-                        {
-                            _llk_pack_fast_untilize_strided_mop_config_(unit_dim);
-                            prev_pack_unit_dim = unit_dim;
-                        }
-#endif
-                        _llk_pack_fast_untilize_block_strided_<FAST_UNTILIZE_MAX_UNIT_DIM, FULL_CT_DIM, DstSync::SyncHalf>(chunk_address, unit_dim);
+                        _llk_pack_fast_untilize_block_strided_<FAST_UNTILIZE_MAX_UNIT_DIM, FULL_CT_DIM, DstSync::SyncHalf>(
+                            chunk_address, unit_dim, prev_pack_unit_dim);
                     }
                     _llk_pack_dest_section_done_<DstSync::SyncHalf, is_fp32_dest_acc_en>();
                     chunk_col += unit_dim;
