@@ -962,4 +962,37 @@ Steady-state (`loop_factor=16`) `L1_TO_L1` comparison:
 | Float32 | Yes | 4 | 7 | 199.76 | 74.40 | -62.8% |
 | Float32 | Yes | 4 | 8 | 98.30 | 65.35 | -33.5% |
 
-Current next action: stop opportunistic cleanup unless a new issue is found in review. The remaining obvious refactors are broad C++ helper extractions in the measured pack loop or pack MOP sequencing, so they should only be attempted with focused `ct<=3` perf first and the full fast-vs-legacy CSV as the merge gate. Next integration work remains promotion from the experimental test path into the production untilize path.
+### 2026-05-17 MOP sequencing perf pass
+
+Treated hot pack-loop/MOP sequencing as perf work, not cleanup, and landed three narrow commits:
+- `23364630382` Avoid redundant fast untilize phase sync.
+- `1361e1917a1` Patch only the phase-close MOP word instead of rebuilding the full MOP.
+- `521f4810477` Cache the contiguous MOP `unit_dim` and patch phase close when the width repeats.
+
+Scope:
+- Affects the contiguous `ct<=4` fast pack path only.
+- Wide `ct>4` remains on the row-strided MOP/replay path and is intentionally unchanged.
+- The direct row fallback remains available behind `FAST_UNTILIZE_STRIDED_MOP_REPLAY=0`.
+
+Focused pre/post comparison (`/tmp/fast_untilize_mopseq_baseline.post.csv` -> `/tmp/fast_untilize_mopcache_broader_candidate.post.csv`, 5 hot variants, `loop_factor=16`):
+
+| marker | run type | mean delta | max win | regressions >2% |
+|:---|:---|---:|---:|---:|
+| KERNEL | PACK_ISOLATE | -15.65% | -20.31% | 0 |
+| KERNEL | L1_TO_L1 | -11.11% | -18.15% | 0 |
+| TILE_LOOP | PACK_ISOLATE | -16.61% | -21.42% | 0 |
+| TILE_LOOP | L1_TO_L1 | -11.72% | -19.11% | 0 |
+
+The third cache step was the smallest win by itself: KERNEL PACK_ISOLATE mean `-1.30%`, L1_TO_L1 mean `-0.89%`, with the only >2% wins on `ct=3`. Still worth keeping because it is localized and did not trip the gate.
+
+Validation after the final MOP sequencing commit:
+- Accuracy: `python_env/bin/python3 -m pytest -q --tb=short tt_metal/tt-llk/tests/python_tests/test_fast_untilize.py` -> `567 passed in 72.71s`.
+- Focused affected perf: `perf_fast_untilize.py -k '(ct_dim:2 or ct_dim:3 or ct_dim:4) and loop_factor:16'` -> `81 passed, 486 deselected in 85.61s`.
+- Full fast + legacy perf gate: `python_env/bin/python3 -m pytest -q --tb=short tt_metal/tt-llk/tests/python_tests/perf_fast_untilize.py tt_metal/tt-llk/tests/python_tests/perf_fast_untilize_legacy_compare.py` -> `1134 passed in 363.02s`.
+- Hooks passed for the touched LLK/test files during each commit.
+
+Working conclusion:
+- Yes, the MOP sequencing path had real headroom. Most of it came from avoiding the redundant phase sync and full MOP rebuild; the remaining cache optimization is incremental.
+- Do not treat further hot pack-loop refactors as cleanup. Continue only as measured perf experiments with focused contiguous-path perf first, then the full fast-vs-legacy gate.
+
+Current next action: promotion from the experimental test path into the production untilize path. Keep the fast path gated by the existing BH/format/dest constraints, preserve legacy fallback from day one, and use the full `test_fast_untilize.py` plus `perf_fast_untilize.py`/`perf_fast_untilize_legacy_compare.py` matrix as the merge gate.
