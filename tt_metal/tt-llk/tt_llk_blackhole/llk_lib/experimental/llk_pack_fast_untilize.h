@@ -279,8 +279,10 @@ inline void _llk_pack_fast_untilize_init_(const std::uint32_t pack_src_format, c
     TTI_WRCFG(p_gpr_pack::TMP1, p_cfg::WRCFG_32b, PCK0_ADDR_CTRL_ZW_REG_0_Zstride_ADDR32);
 
     _llk_pack_fast_untilize_configure_addrmod_();
-    _llk_pack_fast_untilize_load_row_advance_replay_();
-    _llk_pack_fast_untilize_mop_config_(block_ct_dim);
+    if constexpr (full_ct_dim > block_ct_dim)
+    {
+        _llk_pack_fast_untilize_load_row_advance_replay_();
+    }
 }
 
 template <DstSync Dst, std::uint32_t phase_offset>
