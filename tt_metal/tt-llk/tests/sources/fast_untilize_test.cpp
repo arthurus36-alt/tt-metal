@@ -238,6 +238,7 @@ void run_kernel(RUNTIME_PARAMETERS params)
         }
         else if constexpr (PERF_RUN_TYPE == PerfRunType::PACK_ISOLATE)
         {
+            std::uint32_t prev_pack_unit_dim = 0;
             for (std::uint32_t loop = 0; loop < LOOP_FACTOR; loop++)
             {
                 for (std::uint32_t rt = 0; rt < FULL_RT_DIM; rt++)
@@ -256,6 +257,13 @@ void run_kernel(RUNTIME_PARAMETERS params)
                         }
                         else
                         {
+#if FAST_UNTILIZE_STRIDED_MOP_REPLAY
+                            if (unit_dim != prev_pack_unit_dim)
+                            {
+                                _llk_pack_fast_untilize_strided_mop_config_(unit_dim);
+                                prev_pack_unit_dim = unit_dim;
+                            }
+#endif
                             _llk_pack_fast_untilize_block_strided_<FAST_UNTILIZE_MAX_UNIT_DIM, FULL_CT_DIM, DstSync::SyncHalf>(chunk_address, unit_dim);
                         }
                         chunk_col += unit_dim;
@@ -266,6 +274,7 @@ void run_kernel(RUNTIME_PARAMETERS params)
             return;
         }
 
+        std::uint32_t prev_pack_unit_dim = 0;
         for (std::uint32_t loop = 0; loop < LOOP_FACTOR; loop++)
         {
             for (std::uint32_t rt = 0; rt < FULL_RT_DIM; rt++)
@@ -286,6 +295,13 @@ void run_kernel(RUNTIME_PARAMETERS params)
                     }
                     else
                     {
+#if FAST_UNTILIZE_STRIDED_MOP_REPLAY
+                        if (unit_dim != prev_pack_unit_dim)
+                        {
+                            _llk_pack_fast_untilize_strided_mop_config_(unit_dim);
+                            prev_pack_unit_dim = unit_dim;
+                        }
+#endif
                         _llk_pack_fast_untilize_block_strided_<FAST_UNTILIZE_MAX_UNIT_DIM, FULL_CT_DIM, DstSync::SyncHalf>(chunk_address, unit_dim);
                     }
                     _llk_pack_dest_section_done_<DstSync::SyncHalf, is_fp32_dest_acc_en>();

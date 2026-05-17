@@ -574,6 +574,35 @@ G5.1 wide-row long-loop debug:
 - Tradeoff: wide rows are now stable but pack-limited. `ct=5`, `loop_factor=16` is `81.11 cyc/tile` L1_TO_L1 and `72.33 cyc/tile` PACK_ISOLATE; `ct=8`, `loop_factor=16` is `53.19 cyc/tile` L1_TO_L1 and `47.73 cyc/tile` PACK_ISOLATE. The contiguous `ct<=4` path remains the performance target (`ct=4`, `loop_factor=16` is `38.28 cyc/tile` L1_TO_L1, `31.11 cyc/tile` PACK_ISOLATE).
 - Working conclusion: integration should include the direct wide-row path under the same narrow BH/format/dest gate for `ct=5..8`, because the apples-to-apples silicon comparison now confirms full-pipeline L1_TO_L1 wins for every covered wide shape. It is not the final wide-row performance ceiling, but it is shippable as a faster fallback within this gate.
 
+G5.2 wide-row MOP/replay retry:
+- Stable direct fallback was committed first (`9c63da9c8a6`) so the experiment has a clean rollback point.
+- Reintroduced a strided MOP/replay path with two changes from the failing version:
+  - The row-address advance replay is preloaded once and used as the MOP end-op; the MOP is reprogrammed only when `unit_dim` changes, not between top/bottom phases or repeated same-width chunks.
+  - Top and bottom phases reuse the same MOP; the path uses `STALLWAIT(CFG|PACK)` between phases instead of reprogramming the MOP and forcing another `mop_sync`.
+- Direct per-row PACR remains in the header behind `FAST_UNTILIZE_STRIDED_MOP_REPLAY=0`.
+- Validation passes:
+  - `test_fast_untilize.py`: 63 passed.
+  - `perf_fast_untilize.py`: 63 passed.
+- Latest steady-state wide-row TILE_LOOP with MOP/replay:
+
+| rt | ct | L1_TO_L1 | PACK_ISOLATE |
+|---:|---:|---:|---:|
+| 1 | 5 | 76.76 | 72.76 |
+| 1 | 6 | 64.22 | 60.64 |
+| 1 | 7 | 58.34 | 54.41 |
+| 1 | 8 | 51.11 | 47.56 |
+| 2 | 5 | 75.69 | 71.02 |
+| 2 | 6 | 62.93 | 59.18 |
+| 2 | 7 | 57.33 | 54.38 |
+| 2 | 8 | 50.39 | 47.04 |
+| 4 | 5 | 75.06 | 70.72 |
+| 4 | 6 | 62.29 | 58.92 |
+| 4 | 7 | 56.81 | 53.47 |
+| 4 | 8 | 49.81 | 46.78 |
+
+- Compared with the direct fallback, this mainly helps wide full-pipeline cases: `rt=4, ct=5` improves `80.35 -> 75.06`, `ct=7` improves `63.08 -> 56.81`, and `ct=8` improves `52.76 -> 49.81`.
+- Working conclusion: the silicon liveness issue was not inherent to row-strided MOP/replay; it was likely triggered by the earlier hot-path reprogramming / phase sequencing. Keep this MOP/replay path as the preferred wide-row path and keep the direct row path as the safety fallback.
+
 Milestone G6 - integration into real `pack_untilize`:
 - Add a template/runtime gate, e.g. `DestLayout::DirtyForUntilize` or `FAST_PACK_UNTILIZE_BH`, with legacy fallback.
 - First select the fast MOP path when all constraints are met: BH, 16-bit Dst view, `dest_acc=No`, `num_faces=4`, safe output format, and `full_ct_dim>=2`. Use the contiguous MOP for `ct<=4` and the direct row fallback for wider decomposed rows. Keep `ct=1` on legacy.

@@ -22,10 +22,9 @@
 // L1_Dest_addr cfg update needed. Single L1 cfg slot (SEC0_REG1). This is only
 // valid when the 4-tile chunk is the full row.
 //
-// Wider rows use a direct per-row PACR sequence: each chunk row closes with
-// Last=1, then CFGSHIFTMASK advances L1_Dest_addr by the full output row
-// stride. A MOP/replay version hit a silicon mop_sync hang after many short
-// row-closed streams, so the direct sequence is the correctness path.
+// Wider rows use a row-strided stream: each chunk row closes with Last=1, then
+// CFGSHIFTMASK advances L1_Dest_addr by the full output row stride. The direct
+// row sequence is kept as a fallback while the MOP/replay variant is re-tested.
 //
 // ADC strides (units: bytes; src_addr = sum(ch0.X*x + Y*y + Z*z + W*w) divided
 // by datum size to give datum offset; pack_row = datum_offset / FACE_C_DIM):
@@ -52,8 +51,15 @@
 
 #include "llk_pack.h"
 
+#ifndef FAST_UNTILIZE_STRIDED_MOP_REPLAY
+#define FAST_UNTILIZE_STRIDED_MOP_REPLAY 1
+#endif
+
 namespace ckernel
 {
+
+constexpr std::uint32_t FAST_UNTILIZE_ROW_ADVANCE_REPLAY_OFFSET = ckernel::packer::replay_buf_offset;
+constexpr std::uint32_t FAST_UNTILIZE_ROW_ADVANCE_REPLAY_LEN    = 2;
 
 inline void _llk_pack_fast_untilize_configure_addrmod_()
 {
@@ -110,6 +116,44 @@ inline void _llk_pack_fast_untilize_mop_config_(const std::uint32_t unit_dim = 4
             _llk_pack_fast_untilize_row_pacr_(ADDR_MOD_0, p_pacr::ALL_INTF_ACTIVE, 0),
             _llk_pack_fast_untilize_row_pacr_(ADDR_MOD_1, tail_intf, 0));
         tmp.set_last_outer_loop_instr(_llk_pack_fast_untilize_row_pacr_(ADDR_MOD_1, tail_intf, last ? 1 : 0));
+        tmp.program();
+    }
+}
+
+inline void _llk_pack_fast_untilize_load_row_advance_replay_()
+{
+    load_replay_buf(
+        FAST_UNTILIZE_ROW_ADVANCE_REPLAY_OFFSET,
+        FAST_UNTILIZE_ROW_ADVANCE_REPLAY_LEN,
+        []
+        {
+            TTI_CFGSHIFTMASK(1, 0b011, 32 - 1, 0, 0b11, THCON_SEC0_REG1_L1_Dest_addr_ADDR32);
+            TTI_NOP;
+        });
+}
+
+inline void _llk_pack_fast_untilize_strided_mop_config_(const std::uint32_t unit_dim)
+{
+    LLK_ASSERT(unit_dim >= 2 && unit_dim <= 4, "fast_untilize strided pack supports unit_dim 2, 3, or 4");
+
+    constexpr std::uint32_t MOP_OUTER_LOOP = 16;
+    constexpr std::uint32_t MOP_INNER_LOOP = 1;
+
+    if (unit_dim == 2)
+    {
+        ckernel_template tmp(MOP_OUTER_LOOP, MOP_INNER_LOOP, _llk_pack_fast_untilize_row_pacr_(ADDR_MOD_1, p_pacr::ALL_INTF_ACTIVE, 1));
+        tmp.set_end_op(lltt::replay_insn(FAST_UNTILIZE_ROW_ADVANCE_REPLAY_OFFSET, FAST_UNTILIZE_ROW_ADVANCE_REPLAY_LEN));
+        tmp.program();
+    }
+    else
+    {
+        const std::uint32_t tail_intf = unit_dim == 3 ? p_pacr::TWO_INTFS_ACTIVE : p_pacr::ALL_INTF_ACTIVE;
+        ckernel_template tmp(
+            MOP_OUTER_LOOP,
+            MOP_INNER_LOOP,
+            _llk_pack_fast_untilize_row_pacr_(ADDR_MOD_0, p_pacr::ALL_INTF_ACTIVE, 0, 1),
+            _llk_pack_fast_untilize_row_pacr_(ADDR_MOD_1, tail_intf, 1));
+        tmp.set_end_op(lltt::replay_insn(FAST_UNTILIZE_ROW_ADVANCE_REPLAY_OFFSET, FAST_UNTILIZE_ROW_ADVANCE_REPLAY_LEN));
         tmp.program();
     }
 }
@@ -245,6 +289,7 @@ inline void _llk_pack_fast_untilize_init_(const std::uint32_t pack_src_format, c
     TTI_WRCFG(p_gpr_pack::TMP1, p_cfg::WRCFG_32b, PCK0_ADDR_CTRL_ZW_REG_0_Zstride_ADDR32);
 
     _llk_pack_fast_untilize_configure_addrmod_();
+    _llk_pack_fast_untilize_load_row_advance_replay_();
     _llk_pack_fast_untilize_mop_config_(block_ct_dim);
 }
 
@@ -304,6 +349,20 @@ inline void _llk_pack_fast_untilize_block_strided_(
 
     program_packer_destination(address);
 
+#if FAST_UNTILIZE_STRIDED_MOP_REPLAY
+    _llk_pack_fast_untilize_select_phase_<Dst, 128>();
+    TTI_SETADCXY(p_setadc::PAC, 0, 0, 0, 0, 0b0011);
+    TTI_SETADCZW(p_setadc::PAC, 0, 0, 0, 0, 0b0101);
+    ckernel_template::run();
+    TTI_STALLWAIT(p_stall::STALL_CFG, p_stall::PACK);
+
+    // After 16 row-stride end-ops the destination is already at output row 16.
+    _llk_pack_fast_untilize_select_phase_<Dst, 0>();
+    TTI_SETADCXY(p_setadc::PAC, 0, 0, 0, 0, 0b0011);
+    TTI_SETADCZW(p_setadc::PAC, 0, 0, 0, 0, 0b0101);
+    ckernel_template::run();
+    TTI_STALLWAIT(p_stall::STALL_CFG, p_stall::PACK);
+#else
     // Phase 1 emits rows 0..15. Each row is closed and L1_Dest_addr is advanced
     // by the full output row stride from scratch.
     _llk_pack_fast_untilize_select_phase_<Dst, 128>();
@@ -324,6 +383,7 @@ inline void _llk_pack_fast_untilize_block_strided_(
         _llk_pack_fast_untilize_strided_direct_row_(unit_dim);
     }
     TTI_STALLWAIT(p_stall::STALL_CFG, p_stall::PACK);
+#endif
 }
 
 template <DstSync Dst, bool is_fp32_dest_acc_en>
