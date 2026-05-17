@@ -288,15 +288,14 @@ inline void _llk_pack_fast_untilize_init_(const std::uint32_t pack_src_format, c
 template <DstSync Dst, std::uint32_t phase_offset>
 inline void _llk_pack_fast_untilize_select_phase_()
 {
-    if constexpr (Dst == DstSync::SyncFull)
+    TTI_SETDMAREG(0, phase_offset, 0, LO_16(p_gpr_pack::DEST_OFFSET_LO + 0));
+    if constexpr (Dst == DstSync::SyncHalf)
     {
-        TTI_SETDMAREG(0, phase_offset, 0, LO_16(p_gpr_pack::DEST_OFFSET_LO + 0));
+        TTI_SETDMAREG(0, DEST_REGISTER_HALF_SIZE + phase_offset, 0, LO_16(p_gpr_pack::DEST_OFFSET_HI + 0));
     }
     else
     {
-        static_assert(Dst == DstSync::SyncHalf);
-        TTI_SETDMAREG(0, phase_offset, 0, LO_16(p_gpr_pack::DEST_OFFSET_LO + 0));
-        TTI_SETDMAREG(0, DEST_REGISTER_HALF_SIZE + phase_offset, 0, LO_16(p_gpr_pack::DEST_OFFSET_HI + 0));
+        static_assert(Dst == DstSync::SyncFull);
     }
 
     select_packer_dest_registers<Dst>();
