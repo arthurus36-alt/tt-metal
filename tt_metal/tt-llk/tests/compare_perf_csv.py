@@ -11,6 +11,7 @@ beyond the gate.
 
 Usage:
     python compare_perf_csv.py BASELINE.post.csv CANDIDATE.post.csv [--gate 2]
+    python compare_perf_csv.py BASELINE.post.csv CANDIDATE.post.csv --ignore-cols block_ct_dim
 """
 
 import argparse
@@ -34,12 +35,27 @@ KEY_COLS = (
 )
 
 
-def load(path):
+def format_key(key_cols, key):
+    return "/".join(f"{k}={v}" for k, v in zip(key_cols, key))
+
+
+def load(path, key_cols):
     rows = {}
-    with open(path) as f:
+    with open(path, newline="") as f:
         reader = csv.DictReader(f)
-        for row in reader:
-            key = tuple(row[c] for c in KEY_COLS)
+        fieldnames = reader.fieldnames or []
+        required_cols = set(key_cols) | {"marker"}
+        missing = [c for c in sorted(required_cols) if c not in fieldnames]
+        if missing:
+            raise ValueError(f"{path}: missing required columns: {', '.join(missing)}")
+
+        for line_number, row in enumerate(reader, start=2):
+            key = tuple(row[c] for c in key_cols)
+            if key in rows:
+                raise ValueError(
+                    f"{path}: duplicate key after applying ignored columns "
+                    f"at line {line_number}: {format_key(key_cols, key)}"
+                )
             rows[key] = row
     return rows
 
@@ -66,17 +82,30 @@ def main():
         help="filter to a single marker for summary (default KERNEL)",
     )
     ap.add_argument(
+        "--ignore-cols",
+        default="",
+        help="comma-separated join-key columns to ignore, e.g. block_ct_dim",
+    )
+    ap.add_argument(
         "--verbose",
         action="store_true",
         help="print every variant, not just regressions/wins",
     )
     args = ap.parse_args()
 
-    base = load(args.baseline)
-    cand = load(args.candidate)
+    ignored_cols = {c.strip() for c in args.ignore_cols.split(",") if c.strip()}
+    unknown_ignored_cols = ignored_cols - set(KEY_COLS)
+    if unknown_ignored_cols:
+        ap.error(
+            "unknown --ignore-cols entries: " + ", ".join(sorted(unknown_ignored_cols))
+        )
+    key_cols = tuple(c for c in KEY_COLS if c not in ignored_cols)
 
-    only_base = set(base) - set(cand)
-    only_cand = set(cand) - set(base)
+    base = load(args.baseline, key_cols)
+    cand = load(args.candidate, key_cols)
+
+    only_base = {k for k in set(base) - set(cand) if base[k]["marker"] == args.marker}
+    only_cand = {k for k in set(cand) - set(base) if cand[k]["marker"] == args.marker}
     common = set(base) & set(cand)
 
     if only_base:
@@ -84,7 +113,9 @@ def main():
     if only_cand:
         print(f"[warn] {len(only_cand)} variants in candidate missing from baseline")
 
-    sample_row = next(iter(cand.values()))
+    sample_row = next(iter(cand.values()), None) or next(iter(base.values()), None)
+    if sample_row is None:
+        raise ValueError("both CSVs are empty")
     run_cols = mean_columns(sample_row)
 
     # Summary stats per run_col
@@ -93,10 +124,12 @@ def main():
     deltas = defaultdict(list)
 
     rows_out = []
+    marker_keys = []
     for key in sorted(common):
         b, c = base[key], cand[key]
         if b["marker"] != args.marker:
             continue
+        marker_keys.append(key)
         tile_cnt = int(b["tile_cnt"])
         for col in run_cols:
             bv = b.get(col, "")
@@ -116,7 +149,7 @@ def main():
 
     # Print summary
     print(
-        f"\n=== Summary (marker={args.marker}, gate=±{args.gate}%, n={len(common)} variants) ==="
+        f"\n=== Summary (marker={args.marker}, gate=±{args.gate}%, n={len(marker_keys)} variants) ==="
     )
     header = f"{'run_type':<24} {'min%':>8} {'mean%':>8} {'max%':>8} {'#regr':>6} {'#win':>6}"
     print(header)
@@ -143,7 +176,7 @@ def main():
         for key, bv, cv, pct in sorted(items, key=lambda x: -x[3])[:20]:
             label = "/".join(
                 f"{k}={v}"
-                for k, v in zip(KEY_COLS, key)
+                for k, v in zip(key_cols, key)
                 if k
                 in (
                     "formats.input_A",
@@ -164,7 +197,7 @@ def main():
         for key, bv, cv, pct in sorted(items, key=lambda x: x[3])[:10]:
             label = "/".join(
                 f"{k}={v}"
-                for k, v in zip(KEY_COLS, key)
+                for k, v in zip(key_cols, key)
                 if k
                 in (
                     "formats.input_A",
@@ -179,7 +212,7 @@ def main():
     if args.verbose:
         print(f"\n--- All variants ({len(rows_out)} rows) ---")
         for key, col, bv, cv, pct, tile_cnt in rows_out:
-            label = "/".join(f"{k}={v}" for k, v in zip(KEY_COLS, key))
+            label = format_key(key_cols, key)
             col_name = col.replace("mean(", "").rstrip(")")
             print(
                 f"  {col_name:<24} {fmt_pct(pct)}  base={bv:8.0f}  cand={cv:8.0f}  {label}"
@@ -189,4 +222,8 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except ValueError as e:
+        print(f"[error] {e}", file=sys.stderr)
+        sys.exit(2)
