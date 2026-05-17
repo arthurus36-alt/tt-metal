@@ -6,9 +6,9 @@
 // Fast-untilize unpack loads 2/3/4-tile chunks, custom math lays each chunk out for
 // 4-interface row-major readout, and fast_untilize pack writes the RM strip.
 //
-// Current shapes: row-decomposed unit_dim={4,2,3}; ct=1 is left to the
-// integrated legacy fallback path. Hardcoded constraints: num_faces=4,
-// SyncHalf.
+// Current shapes: row-decomposed unit_dim={4,2,3}; compressed BFP inputs unpack
+// one tile at a time to skip exponent sections. ct=1 is left to the integrated
+// legacy fallback path. Hardcoded constraints: num_faces=4, SyncHalf.
 
 #include <cstdint>
 

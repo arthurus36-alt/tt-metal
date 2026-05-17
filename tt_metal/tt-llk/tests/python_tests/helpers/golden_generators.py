@@ -453,6 +453,18 @@ def quantize_mx_tensor_chunked(
     return quantized
 
 
+def quantize_input_to_unpack_format(
+    operand: torch.Tensor, input_format: Optional[DataFormat]
+) -> torch.Tensor:
+    if input_format == DataFormat.Bfp4_b:
+        return _bfp4b_to_float16b(operand)
+    if input_format == DataFormat.Bfp8_b:
+        return _bfp8b_to_float16b(operand)
+    if input_format == DataFormat.MxFp4:
+        return quantize_mx_tensor_chunked(operand, input_format)
+    return operand
+
+
 class SrcFormatModel:
     """
     Source register holds data in TF32 format.
@@ -2807,13 +2819,7 @@ class UntilizeGolden:
     ):
         from helpers.tilize_untilize import untilize_block
 
-        if input_format == DataFormat.Bfp4_b:
-            operand = _bfp4b_to_float16b(operand)
-        elif input_format == DataFormat.Bfp8_b:
-            operand = _bfp8b_to_float16b(operand)
-        elif input_format == DataFormat.MxFp4:
-            # Quantize MXFP4 inputs to match pack/unpack precision before untilize.
-            operand = quantize_mx_tensor_chunked(operand, input_format)
+        operand = quantize_input_to_unpack_format(operand, input_format)
 
         result = untilize_block(
             operand, stimuli_format=data_format, dimensions=dimensions

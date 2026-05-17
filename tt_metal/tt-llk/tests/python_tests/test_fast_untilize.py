@@ -7,7 +7,8 @@ Fast-untilize experimental test (T5-B / tt-metal#42048 + #42049).
 Pipeline: fast_untilize unpack -> dedicated fast_untilize math -> fast_untilize
 pack. Output: row-major strip.
 
-Hardcoded: unit_dim={4,2,3}, num_faces=4, SyncHalf.
+Hardcoded: unit_dim={4,2,3} for regular streams; compressed BFP inputs unpack
+one tile at a time. num_faces=4, SyncHalf.
 Focused goal: silicon-validate the fast-untilize LLK path against golden.
 """
 

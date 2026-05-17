@@ -43,8 +43,9 @@
 // phase source half is selected by reprogramming the active pack DEST target
 // offset: active_half + 128 for top rows, then active_half + 0 for bottom rows.
 //
-// DOMAIN: unit_dim=2/3/4, num_faces=4, SyncHalf, bf16 and Float32 same-format
-// output. Other shapes fall back to legacy `_llk_pack_untilize_` (T2+T3 wins still apply).
+// DOMAIN: unit_dim=2/3/4, num_faces=4, SyncHalf, fp16/fp32 output from supported
+// fast-untilize math layouts. Other shapes fall back to legacy `_llk_pack_untilize_`
+// (T2+T3 wins still apply).
 
 #pragma once
 
