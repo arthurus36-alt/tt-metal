@@ -18,8 +18,11 @@ import pytest
 import torch
 from fast_untilize_common import (
     FAST_UNTILIZE_DIMS,
+    FAST_UNTILIZE_FACE_C,
+    FAST_UNTILIZE_FACE_R,
     FAST_UNTILIZE_NUM_FACES,
     FAST_UNTILIZE_TILE_C,
+    FAST_UNTILIZE_TILE_FACE_ROWS,
     FAST_UNTILIZE_TILE_R,
     fast_untilize_dest_acc_modes,
     fast_untilize_formats,
@@ -48,9 +51,14 @@ def generate_tile_face_row_ids(tile_count, dtype=torch.bfloat16):
     values = []
     for tile in range(tile_count):
         for face in range(FAST_UNTILIZE_NUM_FACES):
-            for row in range(16):
-                value = tile * 64 + face * 16 + row + 1
-                values.extend([value] * 16)
+            for row in range(FAST_UNTILIZE_FACE_R):
+                value = (
+                    tile * FAST_UNTILIZE_TILE_FACE_ROWS
+                    + face * FAST_UNTILIZE_FACE_R
+                    + row
+                    + 1
+                )
+                values.extend([value] * FAST_UNTILIZE_FACE_C)
     return torch.tensor(values, dtype=dtype)
 
 
