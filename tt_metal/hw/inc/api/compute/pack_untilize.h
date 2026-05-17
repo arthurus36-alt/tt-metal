@@ -8,13 +8,22 @@
 #include "llk_assert.h"
 #ifdef TRISC_MATH
 #include "llk_math_unary_datacopy_api.h"
+#ifdef ARCH_BLACKHOLE
+#include "experimental/llk_math_fast_untilize_api.h"
+#endif
 #endif
 #ifdef TRISC_UNPACK
 #include "llk_unpack_A_api.h"
+#ifdef ARCH_BLACKHOLE
+#include "experimental/llk_unpack_fast_untilize_api.h"
+#endif
 #endif
 #ifdef TRISC_PACK
 #include "llk_pack_untilize_api.h"
 #include "llk_pack_tile_api.h"
+#ifdef ARCH_BLACKHOLE
+#include "experimental/llk_pack_fast_untilize_api.h"
+#endif
 #endif
 
 namespace ckernel {
@@ -260,6 +269,130 @@ ALWI void pack_untilize_uninit(uint32_t ocb) {
 #else
     // No-op: Quasar uses dedicated instructions (PACR_UNTILIZE, PACR_STRIDE) that
     // don't conflict with standard PACR paths, so no reconfiguration is needed.
+#endif
+}
+
+#ifdef ARCH_BLACKHOLE
+constexpr std::uint32_t FAST_UNTILIZE_MAX_UNIT_DIM = 4;
+
+constexpr std::uint32_t fast_untilize_next_unit_dim(const std::uint32_t remaining_tiles) {
+    return (remaining_tiles > 5) ? 4 : (remaining_tiles == 5) ? 2 : remaining_tiles;
+}
+
+constexpr bool fast_untilize_is_bfp_b_input_format(const std::uint32_t format) {
+    return format == static_cast<std::uint32_t>(DataFormat::Bfp8_b) ||
+           format == static_cast<std::uint32_t>(DataFormat::Bfp4_b);
+}
+#endif
+
+template <std::uint32_t full_ct_dim>
+ALWI void fast_untilize_init(uint32_t icb, uint32_t ocb, uint32_t call_line = __builtin_LINE()) {
+    static_assert(full_ct_dim > 0, "fast_untilize full_ct_dim must be greater than 0");
+
+#ifdef ARCH_BLACKHOLE
+    if constexpr (full_ct_dim == 1) {
+        pack_untilize_init<1, 1>(icb, ocb, call_line);
+        return;
+    }
+
+    state_configure<Operand::SRCA, Operand::PACK>(icb, ocb, call_line);
+
+    constexpr std::uint32_t first_unit_dim = fast_untilize_next_unit_dim(full_ct_dim);
+
+    UNPACK((llk_unpack_fast_untilize_init<DST_ACCUM_MODE>(
+        icb, fast_untilize_is_bfp_b_input_format(unpack_src_format[get_operand_id(icb)]) ? 1 : first_unit_dim)));
+    MATH((llk_math_fast_untilize_init<DST_ACCUM_MODE>(icb)));
+    PACK((llk_pack_fast_untilize_init<DST_SYNC_MODE, DST_ACCUM_MODE, FAST_UNTILIZE_MAX_UNIT_DIM, full_ct_dim>(ocb)));
+#else
+    pack_untilize_init<full_ct_dim, full_ct_dim>(icb, ocb, call_line);
+#endif
+}
+
+template <std::uint32_t full_ct_dim>
+ALWI void fast_untilize_block(
+    uint32_t icb, uint32_t ocb, uint32_t input_tile_index = 0, uint32_t output_tile_index = 0) {
+    static_assert(full_ct_dim > 0, "fast_untilize full_ct_dim must be greater than 0");
+
+#ifdef ARCH_BLACKHOLE
+    if constexpr (full_ct_dim == 1) {
+        pack_untilize_block<1, 1>(icb, 1, ocb, 0);
+        return;
+    }
+
+    std::uint32_t tiles_done = 0;
+    [[maybe_unused]] std::uint32_t prev_unpack_unit_dim = fast_untilize_next_unit_dim(full_ct_dim);
+    [[maybe_unused]] std::uint32_t prev_pack_unit_dim = 0;
+
+    while (tiles_done < full_ct_dim) {
+        const std::uint32_t remaining_tiles = full_ct_dim - tiles_done;
+        const std::uint32_t unit_dim = fast_untilize_next_unit_dim(remaining_tiles);
+
+        MATH((llk_math_wait_for_dest_available()));
+
+#ifdef TRISC_UNPACK
+        {
+            const std::uint32_t operand_id = get_operand_id(icb);
+            if (fast_untilize_is_bfp_b_input_format(unpack_src_format[operand_id])) {
+                for (std::uint32_t tile = 0; tile < unit_dim; tile++) {
+                    llk_unpack_fast_untilize_block(icb, input_tile_index + tiles_done + tile, 1);
+                }
+            } else {
+                if (unit_dim != prev_unpack_unit_dim) {
+                    llk_unpack_fast_untilize_reinit_unit_dim<DST_ACCUM_MODE>(unit_dim);
+                    prev_unpack_unit_dim = unit_dim;
+                }
+                llk_unpack_fast_untilize_block(icb, input_tile_index + tiles_done, unit_dim);
+            }
+        }
+#endif
+
+        MATH((llk_math_fast_untilize_block<DST_ACCUM_MODE>(0, icb, unit_dim)));
+        MATH((llk_math_dest_section_done<DST_ACCUM_MODE>()));
+
+        PACK((llk_packer_wait_for_math_done()));
+#ifdef TRISC_PACK
+        {
+            const std::uint32_t output_id = get_output_id(ocb);
+            const std::uint32_t output_row_address =
+                get_local_cb_interface(output_id).fifo_wr_ptr +
+                get_local_cb_interface(output_id).fifo_page_size * output_tile_index - 1;
+            const std::uint32_t chunk_offset =
+                SCALE_DATUM_SIZE(pack_dst_format[output_id], tiles_done * TILE_C_DIM) / 16;
+            const std::uint32_t chunk_address = output_row_address + chunk_offset;
+
+            if constexpr (full_ct_dim <= FAST_UNTILIZE_MAX_UNIT_DIM) {
+                llk_pack_fast_untilize_block_at_address<FAST_UNTILIZE_MAX_UNIT_DIM, DST_SYNC_MODE>(
+                    chunk_address, unit_dim, prev_pack_unit_dim);
+            } else {
+                llk_pack_fast_untilize_block_strided_at_address<FAST_UNTILIZE_MAX_UNIT_DIM, full_ct_dim, DST_SYNC_MODE>(
+                    chunk_address, unit_dim, prev_pack_unit_dim);
+            }
+        }
+#endif
+        PACK((llk_pack_dest_section_done<DST_ACCUM_MODE>()));
+
+        tiles_done += unit_dim;
+    }
+#else
+    pack_untilize_block<full_ct_dim, full_ct_dim>(icb, 1, ocb, 0);
+#endif
+}
+
+template <std::uint32_t full_ct_dim>
+ALWI void fast_untilize_uninit(uint32_t icb, uint32_t ocb) {
+    static_assert(full_ct_dim > 0, "fast_untilize full_ct_dim must be greater than 0");
+
+#ifdef ARCH_BLACKHOLE
+    if constexpr (full_ct_dim == 1) {
+        pack_untilize_uninit(ocb);
+        return;
+    }
+
+    UNPACK((llk_unpack_fast_untilize_uninit()));
+    MATH((llk_math_fast_untilize_uninit<DST_ACCUM_MODE>(icb)));
+    PACK((llk_pack_fast_untilize_uninit<DST_SYNC_MODE, DST_ACCUM_MODE>(ocb)));
+#else
+    pack_untilize_uninit(ocb);
 #endif
 }
 
