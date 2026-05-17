@@ -58,6 +58,7 @@ inline void _llk_math_fast_untilize_init_([[maybe_unused]] const std::uint32_t u
     _llk_math_reconfig_remap_(true);
 
     TTI_SETC16(CLR_DVALID_SrcA_Disable_ADDR32, 0);
+    math::reset_counters(p_setrwc::SET_ABD_F);
     _llk_math_fast_untilize_configure_addrmod_();
 }
 

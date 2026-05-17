@@ -318,6 +318,20 @@ inline void _llk_pack_fast_untilize_select_phase_()
     select_packer_dest_registers<Dst>();
 }
 
+inline void _llk_pack_fast_untilize_reset_src_counters_()
+{
+    TTI_SETADCXY(p_setadc::PAC, 0, 0, 0, 0, 0b0011);
+    TTI_SETADCZW(p_setadc::PAC, 0, 0, 0, 0, 0b0101);
+}
+
+inline void _llk_pack_fast_untilize_restore_pack_counters_()
+{
+    // Leave the standard pack counter postcondition for the next LLK in fused
+    // kernels. The regular untilize path also restores PAC Z/W after packing.
+    _llk_pack_fast_untilize_reset_src_counters_();
+    set_dst_write_addr(0);
+}
+
 // One call processes one block of block_ct_dim=4 tiles.
 // Output: 4 tiles' worth of RM strip starting at `address` (in 16B units).
 template <std::uint32_t block_ct_dim = 4, DstSync Dst = DstSync::SyncHalf>
@@ -341,17 +355,16 @@ inline void _llk_pack_fast_untilize_block_(
         _llk_pack_fast_untilize_mop_patch_last_(unit_dim, false);
     }
     _llk_pack_fast_untilize_select_phase_<Dst, 128>();
-    TTI_SETADCXY(p_setadc::PAC, 0, 0, 0, 0, 0b0011);
-    TTI_SETADCZW(p_setadc::PAC, 0, 0, 0, 0, 0b0101);
+    _llk_pack_fast_untilize_reset_src_counters_();
     ckernel_template::run();
 
     // Phase 2 emits bottom strip rows and closes the stream. Phase 1 already
     // programmed the MOP body; only the final PACR's Last bit changes.
     _llk_pack_fast_untilize_mop_patch_last_(unit_dim, true);
     _llk_pack_fast_untilize_select_phase_<Dst, 0>();
-    TTI_SETADCXY(p_setadc::PAC, 0, 0, 0, 0, 0b0011);
-    TTI_SETADCZW(p_setadc::PAC, 0, 0, 0, 0, 0b0101);
+    _llk_pack_fast_untilize_reset_src_counters_();
     ckernel_template::run();
+    _llk_pack_fast_untilize_restore_pack_counters_();
 }
 
 // One call processes one block_ct_dim=4 chunk inside a wider row.
@@ -377,23 +390,21 @@ inline void _llk_pack_fast_untilize_block_strided_(
 
 #if FAST_UNTILIZE_STRIDED_MOP_REPLAY
     _llk_pack_fast_untilize_select_phase_<Dst, 128>();
-    TTI_SETADCXY(p_setadc::PAC, 0, 0, 0, 0, 0b0011);
-    TTI_SETADCZW(p_setadc::PAC, 0, 0, 0, 0, 0b0101);
+    _llk_pack_fast_untilize_reset_src_counters_();
     ckernel_template::run();
     TTI_STALLWAIT(p_stall::STALL_CFG, p_stall::PACK);
 
     // After 16 row-stride end-ops the destination is already at output row 16.
     _llk_pack_fast_untilize_select_phase_<Dst, 0>();
-    TTI_SETADCXY(p_setadc::PAC, 0, 0, 0, 0, 0b0011);
-    TTI_SETADCZW(p_setadc::PAC, 0, 0, 0, 0, 0b0101);
+    _llk_pack_fast_untilize_reset_src_counters_();
     ckernel_template::run();
     TTI_STALLWAIT(p_stall::STALL_CFG, p_stall::PACK);
+    _llk_pack_fast_untilize_restore_pack_counters_();
 #else
     // Phase 1 emits rows 0..15. Each row is closed and L1_Dest_addr is advanced
     // by the full output row stride from scratch.
     _llk_pack_fast_untilize_select_phase_<Dst, 128>();
-    TTI_SETADCXY(p_setadc::PAC, 0, 0, 0, 0, 0b0011);
-    TTI_SETADCZW(p_setadc::PAC, 0, 0, 0, 0, 0b0101);
+    _llk_pack_fast_untilize_reset_src_counters_();
     for (std::uint32_t row = 0; row < FACE_R_DIM; row++)
     {
         _llk_pack_fast_untilize_strided_direct_row_(unit_dim);
@@ -402,13 +413,13 @@ inline void _llk_pack_fast_untilize_block_strided_(
 
     // After 16 row-stride end-ops the destination is already at output row 16.
     _llk_pack_fast_untilize_select_phase_<Dst, 0>();
-    TTI_SETADCXY(p_setadc::PAC, 0, 0, 0, 0, 0b0011);
-    TTI_SETADCZW(p_setadc::PAC, 0, 0, 0, 0, 0b0101);
+    _llk_pack_fast_untilize_reset_src_counters_();
     for (std::uint32_t row = 0; row < FACE_R_DIM; row++)
     {
         _llk_pack_fast_untilize_strided_direct_row_(unit_dim);
     }
     TTI_STALLWAIT(p_stall::STALL_CFG, p_stall::PACK);
+    _llk_pack_fast_untilize_restore_pack_counters_();
 #endif
 }
 

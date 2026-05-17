@@ -864,8 +864,43 @@ Pre-stage next iter's config in inactive bank while current iter is packing. Eli
 - Unpack emits zero SrcB dvalids only when `is_fp32_dest_acc_en` so math can use `ELWADD` as the native SrcA + zero-SrcB -> DEST copy.
 - Math keeps fp32 DEST enabled and uses an `ELWADD` copy path for fp32 DEST; the original `MOVA2D` path remains for 16-bit DEST.
 - Pack no longer forces `Read_32b_data=0` or reconfigures source format to bf16 in fast-untilize init; it relies on normal pack configuration and uses the caller's `pack_src_format` for strides.
-- Correctness status: `python3 -m pytest -q tt_metal/tt-llk/tests/python_tests/test_fast_untilize.py` passes with `189 passed`, covering bf16 `dest_acc=No/Yes`, Float32 `dest_acc=Yes`, all `rt={1,2,4}`, `ct=2..8`, row-id/random stimuli, and overflow guards.
+- Correctness status: `pytest -q --tb=short tt_metal/tt-llk/tests/python_tests/test_fast_untilize.py` passes with `2160 passed`, covering bf16/fp32/BFP8/BFP4 inputs, fp16/fp32 outputs, `dest_acc=No/Yes` where valid, `dest_sync=Half/Full`, `rt={1,2,4}`, `ct={2..9,12,16}`, row-id/random stimuli, and overflow guards.
 - Caveat: Float32 input through this path still follows existing source-register format inference (`Float32 -> Tf32` before math unless a future unpack-to-dest design is added). This is native fp32 DEST, not a full-precision Float32 unpack-to-dest pipeline.
+- Production integration caveat: a conv3d fused-kernel regression exposed that fast untilize must re-enter the normal math/pack sync contract and restore PACK format state when matmul/bias `pack_tile` traffic precedes untilize in the same kernel. A raw math-side `CLEARDVALID` experiment hung and should not be used as the production fix.
+- Production validation: the fused conv3d repro `tests/ttnn/unit_tests/operations/conv/test_conv3d.py::test_conv3d_sweep_shapes[padding_mode=zeros-padding_011-groups_1-stride_111-kernel_333-W=9-H=10-T=8-C_out=64-C_in=12-B=1]` passes with PCC `0.9999901378033722`, and the prior fold/permutation hang repro passes under `scripts/run_safe_pytest.sh`.
+
+### 2026-05-17 production-sync perf rerun
+
+Command:
+- `python_env/bin/python3 -m pytest -q --tb=short tt_metal/tt-llk/tests/python_tests/perf_fast_untilize.py tt_metal/tt-llk/tests/python_tests/perf_fast_untilize_legacy_compare.py` -> `2430 passed in 859.36s`.
+
+Coverage:
+- Fast path: `1620` variants, doubled across `DestSync.Half` and `DestSync.Full`.
+- Legacy comparison: `810` variants.
+- Formats: `Float16_b -> Float16_b`, `Float32 -> Float32`, `Bfp8_b -> Float16_b`, `Bfp8_b -> Float32`, `Bfp4_b -> Float16_b`, `Bfp4_b -> Float32`.
+
+Production-sync fix perf impact:
+- The saved exact one-case snapshot (`Float16_b -> Float16_b`, `dest_acc=No`, `rt=2`, `ct=9`, `loop_factor=16`, `DestSync.Half`) is unchanged: KERNEL `L1_TO_L1` `18976.5 -> 18976.0`, TILE_LOOP `L1_TO_L1` `63.8906 -> 63.8889`.
+- Against the nearest broad saved run (`/tmp/fast_untilize_after_mopseq_full.post.csv`), current `DestSync.Half` common rows are noise-level: KERNEL `L1_TO_L1` mean `-0.01%`, max `+1.33%`; KERNEL `PACK_ISOLATE` mean `+0.04%`, max `+1.00%`; TILE_LOOP `L1_TO_L1` mean `-0.03%`, max `+2.68%`.
+
+Current fast-vs-legacy summary (`KERNEL`, lower is better):
+
+| dest sync | L1_TO_L1 wins | L1_TO_L1 mean delta | aggregate speedup | PACK_ISOLATE wins | PACK_ISOLATE mean delta | aggregate pack speedup |
+|:---|---:|---:|---:|---:|---:|---:|
+| Half | 788/810 | -30.28% | 1.624x | 803/810 | -35.30% | 1.682x |
+| Full | 703/810 | -17.34% | 1.265x | 810/810 | -37.13% | 1.705x |
+
+Current fast-vs-legacy steady per-tile summary (`TILE_LOOP`, lower is better):
+
+| dest sync | L1_TO_L1 wins | L1_TO_L1 mean delta | aggregate speedup | PACK_ISOLATE wins | PACK_ISOLATE mean delta | aggregate pack speedup |
+|:---|---:|---:|---:|---:|---:|---:|
+| Half | 810/810 | -38.21% | 1.678x | 803/810 | -40.42% | 1.741x |
+| Full | 764/810 | -24.21% | 1.381x | 806/810 | -41.86% | 1.789x |
+
+Conclusion:
+- The production sync/state fix does not create a measurable `DestSync.Half` perf regression on the common broad run.
+- `DestSync.Half` remains the default/focus: all per-tile `L1_TO_L1` points beat legacy, and the small KERNEL-only regressions are cold/short-loop overhead.
+- `DestSync.Full` is still functionally covered and pack-isolate is consistently faster, but some full-pipeline KERNEL regressions remain, concentrated in BFP4/BFP8 `-> Float16_b`, `dest_acc=No`, `ct=5`. Treat SyncFull follow-up as perf work, not cleanup.
 
 ### 2026-05-17 perf comparison with dest mode
 
@@ -1018,3 +1053,26 @@ Preferred order if we take more perf risk:
 4. Phase fusion or sync removal only after the above are exhausted.
 
 Current next action: promotion from the experimental test path into the production untilize path. Keep the fast path gated by the existing BH/format/dest constraints, preserve legacy fallback from day one, and use the full `test_fast_untilize.py` plus `perf_fast_untilize.py`/`perf_fast_untilize_legacy_compare.py` matrix as the merge gate.
+
+### 2026-05-17 ct=2 production re-enable
+
+New conv3d repro:
+- `tests/ttnn/unit_tests/operations/conv/test_conv3d.py::test_conv3d_sweep_shapes[padding_mode=zeros-padding_011-groups_1-stride_111-kernel_111-W=9-H=10-T=8-C_out=64-C_in=12-B=1]`
+
+Findings:
+- Fast path failed with bad PCC around `0.18-0.19`.
+- Forcing legacy untilize passed with PCC `0.9999905603834628`.
+- The no-bias variant also failed, so the issue is not bias math.
+- The direct LLK `ct=2` path still passes in isolation; the failure is a fused production interaction after the K=1 regular-tilize/matmul producer.
+- Restoring only PAC W after fast pack did not fix the repro. Restoring PAC X/Y/Z and W after the final fast-pack phase fixes it, matching regular untilize's post-pack counter discipline before the next LLK in a fused kernel.
+
+Decision:
+- Re-enable production fast-untilize for `ct>=2`.
+- Keep the post-block PAC counter restore in the LLK pack path for both contiguous and row-strided fast untilize. The extra restore is a correctness boundary between fast untilize and subsequent regular pack users.
+
+Validation after the fix:
+- `kernel_111` repro passes with PCC `0.9999905603834628`.
+- Prior `kernel_333` conv3d repro still passes with PCC `0.9999901378033722`.
+- Focused LLK coverage: `test_fast_untilize.py -k 'Float16_b and Half'` -> `720 passed, 1440 deselected`, including ct=2, BFP inputs, random/row-id stimuli, and overflow guards.
+- Exact Full-sync ct=2 smoke: 4 selected direct/guard cases passed.
+- Focused perf (`Float16_b->Float16_b`, `rt=1`, `ct=2`, SyncHalf, `loop_factor=16`, dest_acc=No): current fast KERNEL `L1_TO_L1=2371.5`, `PACK_ISOLATE=1840.0`; prior fast baseline was `2339.0` / `1824.0` (`~+1-2%`); legacy is `4743.0` / `4400.0`, so the fast path keeps the large win.
