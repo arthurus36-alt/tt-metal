@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// BH Fast-Untilize Math - T5 MVP.
+// BH Fast-Untilize Math - T5-B experimental path.
 //
 // Consumes 2/3/4 fast_untilize unpack tiles (four SrcA dvalids per tile) and
 // writes a Dst layout matching llk_pack_fast_untilize.h:
@@ -108,7 +108,7 @@ inline void _llk_math_fast_untilize_block_(
     [[maybe_unused]] const std::uint32_t num_faces    = 4)
 {
     LLK_ASSERT(block_ct_dim >= 2 && block_ct_dim <= 4, "T5 fast-untilize supports block_ct_dim 2, 3, or 4");
-    LLK_ASSERT(num_faces == 4, "T5 fast-untilize MVP only supports four-face tiles");
+    LLK_ASSERT(num_faces == 4, "T5 fast-untilize only supports four-face tiles");
 
     math::set_dst_write_addr<DstTileShape::Tile32x32, UnpackDestination::SrcRegs>(dst_index);
     TTI_SETRWC(p_setrwc::CLR_NONE, 0, 0, 0, 0, p_setrwc::SET_ABD_F);

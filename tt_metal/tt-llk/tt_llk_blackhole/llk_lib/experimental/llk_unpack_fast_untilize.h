@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// BH Fast-Untilize Unpack - T5 MVP.
+// BH Fast-Untilize Unpack - T5-B experimental path.
 //
 // This is the standard unpack_A face stream specialized for fast_untilize:
 // emit only real SrcA dvalids and skip the generic unpack_A zero SrcB sideband.

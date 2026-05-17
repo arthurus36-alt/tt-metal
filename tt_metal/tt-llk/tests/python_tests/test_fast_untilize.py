@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Fast-untilize MVP test (T5-B / tt-metal#42048 + #42049).
+Fast-untilize experimental test (T5-B / tt-metal#42048 + #42049).
 
 Pipeline: fast_untilize unpack -> dedicated fast_untilize math -> fast_untilize
 pack. Output: row-major strip.
@@ -64,7 +64,7 @@ def test_fast_untilize(formats, dest_acc, dimensions, stimulus_kind):
         pytest.skip("BH only")
 
     input_height_tiles, input_width_tiles = dimensions
-    assert 2 <= input_width_tiles <= 8, "T5-B bring-up supports ct=2..8"
+    assert 2 <= input_width_tiles <= 8, "T5-B fast_untilize supports ct=2..8"
 
     input_dimensions = [input_height_tiles * TILE_R, input_width_tiles * TILE_C]
     tile_count = input_height_tiles * input_width_tiles

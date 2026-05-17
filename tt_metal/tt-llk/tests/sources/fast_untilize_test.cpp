@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// BH fast-untilize bring-up test (T5-B / tt-metal#42048 + #42049).
+// BH fast-untilize experimental test (T5-B / tt-metal#42048 + #42049).
 // Fast-untilize unpack loads 2/3/4-tile chunks, custom math lays each chunk out for
 // 4-interface row-major readout, and fast_untilize pack writes the RM strip.
 //
@@ -25,7 +25,7 @@ std::uint32_t math_sync_tile_dst_index = 0;
 constexpr std::uint32_t FAST_UNTILIZE_MAX_UNIT_DIM = 4;
 constexpr std::uint32_t MAX_UNITS_PER_ROW          = 16;
 
-static_assert(PERF_RUN_TYPE != PerfRunType::L1_CONGESTION, "L1 congestion mode is not supported for fast_untilize MVP");
+static_assert(PERF_RUN_TYPE != PerfRunType::L1_CONGESTION, "L1 congestion mode is not supported for fast_untilize");
 static_assert(BLOCK_CT_DIM == FULL_CT_DIM, "fast_untilize_test expects one full tile row per kernel instance");
 static_assert(FULL_CT_DIM >= 2 && FULL_CT_DIM <= 8, "fast_untilize_test supports ct=2..8; ct=1 uses legacy fallback");
 
