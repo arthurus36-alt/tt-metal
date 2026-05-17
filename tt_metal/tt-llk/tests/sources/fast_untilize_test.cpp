@@ -67,7 +67,7 @@ inline std::uint32_t decompose_row(const std::uint32_t ct_dim, std::uint32_t uni
 
 #ifdef LLK_TRISC_UNPACK
 
-#include "experimental/llk_unpack_fast_untilize.h"
+#include "experimental/llk_unpack_fast_untilize_api.h"
 #include "llk_unpack_common.h"
 
 void run_kernel(RUNTIME_PARAMETERS params)
@@ -83,7 +83,8 @@ void run_kernel(RUNTIME_PARAMETERS params)
         ZONE_SCOPED("INIT")
         _llk_unpack_hw_configure_<is_fp32_dest_acc_en>(
             formats.unpack_A_src, formats.unpack_B_src, formats.unpack_A_dst, formats.unpack_B_dst, FACE_R_DIM, FACE_R_DIM, 4, 4);
-        ckernel::_llk_unpack_fast_untilize_init_<is_fp32_dest_acc_en>(formats.unpack_A_src, formats.unpack_A_dst, FAST_UNTILIZE_BFP_B_INPUT ? 1 : unit_dims[0]);
+        llk_unpack_fast_untilize_init_with_formats<is_fp32_dest_acc_en>(
+            formats.unpack_A_src, formats.unpack_A_dst, FAST_UNTILIZE_BFP_B_INPUT ? 1 : unit_dims[0]);
         PROFILER_SYNC();
     }
     {
@@ -112,17 +113,17 @@ void run_kernel(RUNTIME_PARAMETERS params)
                     {
                         for (std::uint32_t tile = 0; tile < unit_dim; tile++)
                         {
-                            ckernel::_llk_unpack_fast_untilize_block_(L1_ADDRESS(buffer_A[rt * FULL_CT_DIM + chunk_col + tile]), 1);
+                            llk_unpack_fast_untilize_block_at_address(L1_ADDRESS(buffer_A[rt * FULL_CT_DIM + chunk_col + tile]), 1);
                         }
                     }
                     else
                     {
                         if (unit_dim != prev_unit_dim)
                         {
-                            ckernel::_llk_unpack_fast_untilize_reinit_unit_dim_<is_fp32_dest_acc_en>(unit_dim);
+                            llk_unpack_fast_untilize_reinit_unit_dim<is_fp32_dest_acc_en>(unit_dim);
                             prev_unit_dim = unit_dim;
                         }
-                        ckernel::_llk_unpack_fast_untilize_block_(L1_ADDRESS(buffer_A[rt * FULL_CT_DIM + chunk_col]), unit_dim);
+                        llk_unpack_fast_untilize_block_at_address(L1_ADDRESS(buffer_A[rt * FULL_CT_DIM + chunk_col]), unit_dim);
                     }
                     chunk_col += unit_dim;
                 }
@@ -132,7 +133,7 @@ void run_kernel(RUNTIME_PARAMETERS params)
     }
     {
         ZONE_SCOPED("UNINIT")
-        ckernel::_llk_unpack_fast_untilize_uninit_();
+        llk_unpack_fast_untilize_uninit();
     }
 }
 
@@ -140,7 +141,7 @@ void run_kernel(RUNTIME_PARAMETERS params)
 
 #ifdef LLK_TRISC_MATH
 
-#include "experimental/llk_math_fast_untilize.h"
+#include "experimental/llk_math_fast_untilize_api.h"
 #include "llk_math_common.h"
 
 void run_kernel(RUNTIME_PARAMETERS params)
@@ -155,7 +156,7 @@ void run_kernel(RUNTIME_PARAMETERS params)
         ZONE_SCOPED("INIT")
         _llk_math_pack_sync_init_<dest_sync, is_fp32_dest_acc_en>();
         _llk_math_hw_configure_<is_fp32_dest_acc_en>(formats.math, formats.math);
-        ckernel::_llk_math_fast_untilize_init_<is_fp32_dest_acc_en>(formats.math);
+        llk_math_fast_untilize_init_with_format<is_fp32_dest_acc_en>(formats.math);
         PROFILER_SYNC();
     }
     {
@@ -181,7 +182,7 @@ void run_kernel(RUNTIME_PARAMETERS params)
                     {
                         _llk_math_wait_for_dest_available_<dest_sync>();
                     }
-                    ckernel::_llk_math_fast_untilize_block_<is_fp32_dest_acc_en>(0, formats.math, unit_dims[u]);
+                    llk_math_fast_untilize_block_with_format<is_fp32_dest_acc_en>(0, formats.math, unit_dims[u]);
                     if constexpr (PERF_RUN_TYPE == PerfRunType::L1_TO_L1)
                     {
                         _llk_math_dest_section_done_<dest_sync, is_fp32_dest_acc_en>();
@@ -195,7 +196,7 @@ void run_kernel(RUNTIME_PARAMETERS params)
     {
         // Keep this zone on a distinct line to avoid 16-bit profiler hash collisions.
         ZONE_SCOPED("UNINIT")
-        ckernel::_llk_math_fast_untilize_uninit_<is_fp32_dest_acc_en>(formats.math);
+        llk_math_fast_untilize_uninit_with_format<is_fp32_dest_acc_en>(formats.math);
     }
 }
 
@@ -203,7 +204,7 @@ void run_kernel(RUNTIME_PARAMETERS params)
 
 #ifdef LLK_TRISC_PACK
 
-#include "experimental/llk_pack_fast_untilize.h"
+#include "experimental/llk_pack_fast_untilize_api.h"
 #include "llk_pack_common.h"
 
 void run_kernel(RUNTIME_PARAMETERS params)
@@ -241,7 +242,7 @@ void run_kernel(RUNTIME_PARAMETERS params)
         _llk_pack_dest_init_<dest_sync, is_fp32_dest_acc_en>();
         _llk_pack_hw_configure_<is_fp32_dest_acc_en, ckernel::PackMode::Default>(
             formats.pack_src, formats.pack_dst, SCALE_DATUM_SIZE(formats.pack_dst, TILE_C_DIM * TILE_R_DIM));
-        _llk_pack_fast_untilize_init_<dest_sync, is_fp32_dest_acc_en, FAST_UNTILIZE_MAX_UNIT_DIM, FULL_CT_DIM>(formats.pack_src, formats.pack_dst);
+        llk_pack_fast_untilize_init_with_formats<dest_sync, is_fp32_dest_acc_en, FAST_UNTILIZE_MAX_UNIT_DIM, FULL_CT_DIM>(formats.pack_src, formats.pack_dst);
         PROFILER_SYNC();
     }
     {
@@ -271,11 +272,12 @@ void run_kernel(RUNTIME_PARAMETERS params)
                     }
                     if constexpr (FULL_CT_DIM <= FAST_UNTILIZE_MAX_UNIT_DIM)
                     {
-                        _llk_pack_fast_untilize_block_<FAST_UNTILIZE_MAX_UNIT_DIM, dest_sync>(chunk_address, unit_dim, prev_pack_unit_dim);
+                        llk_pack_fast_untilize_block_at_address<FAST_UNTILIZE_MAX_UNIT_DIM, dest_sync>(chunk_address, unit_dim, prev_pack_unit_dim);
                     }
                     else
                     {
-                        _llk_pack_fast_untilize_block_strided_<FAST_UNTILIZE_MAX_UNIT_DIM, FULL_CT_DIM, dest_sync>(chunk_address, unit_dim, prev_pack_unit_dim);
+                        llk_pack_fast_untilize_block_strided_at_address<FAST_UNTILIZE_MAX_UNIT_DIM, FULL_CT_DIM, dest_sync>(
+                            chunk_address, unit_dim, prev_pack_unit_dim);
                     }
                     if constexpr (PERF_RUN_TYPE == PerfRunType::L1_TO_L1)
                     {
@@ -296,7 +298,7 @@ void run_kernel(RUNTIME_PARAMETERS params)
     }
     {
         ZONE_SCOPED("UNINIT")
-        _llk_pack_fast_untilize_uninit_<dest_sync, is_fp32_dest_acc_en>(formats.pack_dst, formats.pack_src);
+        llk_pack_fast_untilize_uninit_with_formats<dest_sync, is_fp32_dest_acc_en>(formats.pack_dst, formats.pack_src);
     }
 
     if (NUM_GUARD > 1)
