@@ -257,11 +257,11 @@ inline void _llk_pack_fast_untilize_init_(const std::uint32_t pack_src_format, c
     TTI_SETADCXX(p_setadc::PAC, FACE_C_DIM - 1, 0x0);
 
     // Strides for our row/block/phase advance scheme.
-    const std::uint32_t x_stride = (pack_src_format & 0x3) == ckernel::to_underlying(DataFormat::Float32)   ? 4
-                                   : (pack_src_format & 0x3) == ckernel::to_underlying(DataFormat::Float16) ? 2
-                                                                                                            : 1;
+    const std::uint32_t bytes_per_datum = (pack_src_format & 0x3) == ckernel::to_underlying(DataFormat::Float32)   ? 4
+                                          : (pack_src_format & 0x3) == ckernel::to_underlying(DataFormat::Float16) ? 2
+                                                                                                                   : 1;
     // y_stride: 1 face-row of 16 datums per y+=1
-    const std::uint32_t y_stride = FACE_C_DIM * x_stride;
+    const std::uint32_t y_stride = FACE_C_DIM * bytes_per_datum;
     // z_stride: one block of four face-tile-groups per z+=1.
     const std::uint32_t z_stride = FAST_UNTILIZE_BLOCK_STRIDE_ROWS * y_stride;
     // w_stride: retained for consistency with the pack address generator setup.
