@@ -830,6 +830,22 @@ Pre-stage next iter's config in inactive bank while current iter is packing. Eli
 
 ## 9. Next action
 
+### 2026-05-17 cleanup pass status
+
+- Current cleanup commits on `pjosipovic/bh-untilize-t5`:
+  - `b0b26099c98` Trim dead BH fast untilize pack init setup.
+  - `0fbdca92919` Share fast untilize test sweep setup.
+  - `abaea410520` Harden LLK perf CSV comparison.
+  - `8906dd32197` Gate BH fast untilize row-stride scratch setup.
+  - `654bc667d17` Use `pytest.fail` for fast untilize mismatches.
+  - `3e71ade886c` Refresh fast untilize experimental wording.
+- Current validation after the latest code/comment cleanup:
+  - Accuracy: `python3 -m pytest -q tt_metal/tt-llk/tests/python_tests/test_fast_untilize.py` -> `189 passed in 20.81s`.
+  - Perf: `python3 -m pytest -q tt_metal/tt-llk/tests/python_tests/perf_fast_untilize.py tt_metal/tt-llk/tests/python_tests/perf_fast_untilize_legacy_compare.py` -> `378 passed in 121.02s`.
+  - Fast-vs-saved CSV gate: no `TILE_LOOP` regressions >2%; max deltas were `L1_TO_L1 +0.16%`, `UNPACK_ISOLATE +0.40%`, `MATH_ISOLATE +0.85%`, `PACK_ISOLATE +0.09%`.
+  - Fast-vs-legacy apples-to-apples: `L1_TO_L1` wins `189/189`; `PACK_ISOLATE` wins `188/189` with max non-win `+0.98%`.
+- Cleanup lesson: extracting the duplicated pack row/chunk loop in `fast_untilize_test.cpp` into inline helpers was functionally correct but regressed small `ct<=3` `PACK_ISOLATE` cases by up to ~23%. Keep that measured hot loop spelled out unless a future refactor proves codegen parity.
+
 ### 2026-05-17 fp32 DEST status
 
 - Native fp32 DEST support is now implemented for the experimental BH fast-untilize path rather than using the fast-tilize compat shortcut.
@@ -846,8 +862,8 @@ Pre-stage next iter's config in inactive bank while current iter is packing. Eli
   - `Float16_b -> Float16_b`, `dest_acc=Yes`
   - `Float32 -> Float32`, `dest_acc=Yes`
 - Full comparison command: `python3 -m pytest -q tt_metal/tt-llk/tests/python_tests/perf_fast_untilize.py tt_metal/tt-llk/tests/python_tests/perf_fast_untilize_legacy_compare.py`
-- Result: `378 passed in 121.60s`.
-- Fast path wins on all `189/189` `L1_TO_L1` points and all `189/189` `PACK_ISOLATE` points.
+- Latest result: `378 passed in 121.02s`.
+- Fast path wins on all `189/189` `L1_TO_L1` points and `188/189` `PACK_ISOLATE` points. The remaining pack-isolate non-win is below the 2% gate (`max +0.98%`), while full `L1_TO_L1` still wins.
 - Legacy baseline note: for `dest_acc=Yes`, SyncHalf has only four destination tiles, so the regular baseline caps `BLOCK_CT_DIM` at 4. That means `ct=5/7` use `block_ct=1`, `ct=6` uses `block_ct=3`, and `ct=8` uses `block_ct=4`.
 
 Average delta over all `loop_factor={1,4,16}` points:
@@ -934,8 +950,4 @@ Steady-state (`loop_factor=16`) `L1_TO_L1` comparison:
 | Float32 | Yes | 4 | 7 | 199.76 | 74.40 | -62.8% |
 | Float32 | Yes | 4 | 8 | 98.30 | 65.35 | -33.5% |
 
-Start with **Task 0** (baseline + diff infra) followed by **Task 1** (host harness fix — cheap win). Then split:
-- **Path A (safe perf wins):** Task 2 → Task 3 → Task 4. Lands incremental 20-30% improvement with low risk over ~10 days.
-- **Path B (structural):** Task 5. Higher risk, biggest single win (30-50%).
-
-Recommended: Path A first to bank wins, then Path B with confidence baseline. T6 is opportunistic; T7 is a gate before merging T5; T8 is post-epic.
+Current next action: continue only small cleanup items that preserve the perf CSV gate. Avoid broad C++ helper refactors in the measured pack loop unless they are backed by focused `ct<=3` perf before the full sweep. Next integration work remains promotion from the experimental test path into the production untilize path, with the current fast-vs-legacy CSV as the merge gate.
