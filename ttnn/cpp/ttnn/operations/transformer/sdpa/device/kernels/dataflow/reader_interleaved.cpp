@@ -121,8 +121,7 @@ void kernel_main() {
     const uint32_t q_chunks_per_core = local_q_end - local_q_start;
 
     // Global Q scheduling runtime args (parsed after chain metadata so the host-side ordering
-    // aligns for both causal and non-causal). Host enforces no chunked/no attention_sink under
-    // global_q_scheduling.
+    // aligns for both causal and non-causal).
     uint32_t global_q_start = 0;
     uint32_t global_q_count = 0;
 
@@ -618,9 +617,11 @@ void kernel_main() {
 
         if constexpr (global_q_scheduling) {
             // Global Q scheduling: iterate over a linear range of B*NQH*q_num_chunks chunks.
-            // Restrictions enforced on host: !is_chunked, !use_attention_sink. Chain forwarding
-            // works under non-causal global_q: per-(nb, nq) q_iter (reset on head transition) is
-            // what should_forward / should_receive's `q_iter < next_core_q_chunks` gate expects.
+            // - per_head_q_iter resets on (nb, nq) transition: chain forwarding's
+            //   `q_iter < next_core_q_chunks` gate expects this (chains are non-causal only).
+            // - is_chunked: page-table read on nb transition, single-entry CB rotated forward.
+            // - use_attention_sink: pushed every iter, since compute pops Sq_chunk_t per
+            //   sdpa_inner_loop call and under global_q each iter is exactly one call.
             uint32_t prev_nb = static_cast<uint32_t>(-1);
             uint32_t prev_nq = static_cast<uint32_t>(-1);
             uint32_t per_head_q_iter = 0;
@@ -636,14 +637,38 @@ void kernel_main() {
                             mask_batch_offset = decoded.nb * valid_Sqt * valid_Skt * NQH;
                         }
                     }
+                    if constexpr (is_chunked) {
+                        if (prev_nb != static_cast<uint32_t>(-1)) {
+                            cb_pop_front(cb_id_page_table, 1);
+                        }
+                        cb_reserve_back(cb_id_page_table, 1);
+                        page_table_ptr = read_page_table_for_batch(
+                            cb_id_page_table, decoded.nb, page_table_args, page_table_addr, page_table_stick_size);
+                        cb_push_back(cb_id_page_table, 1);
+                    }
                 }
                 if (decoded.nb != prev_nb || decoded.nq != prev_nq) {
                     per_head_q_iter = 0;
                     prev_nb = decoded.nb;
                     prev_nq = decoded.nq;
                 }
+                if constexpr (use_attention_sink) {
+                    cb_reserve_back(cb_attention_sink, Sq_chunk_t);
+                    uint32_t attention_sink_write_ptr = get_write_ptr(cb_attention_sink);
+                    const uint32_t sink_tile_id = attention_sink_tile_shape.id_of(0, decoded.nq, 0, 0);
+                    noc_async_read_tile(sink_tile_id, attention_sink_reader, attention_sink_write_ptr);
+                    noc_async_read_barrier();
+                    fill_attention_sink_tiles<attention_sink_tile_bytes>(
+                        cb_attention_sink, Sq_chunk_t, attention_sink_write_ptr);
+                    cb_push_back(cb_attention_sink, Sq_chunk_t);
+                }
                 read_one_chunk(decoded.nb, decoded.nq, decoded.q_chunk, per_head_q_iter, mask_batch_offset);
                 ++per_head_q_iter;
+            }
+            if constexpr (is_chunked) {
+                if (prev_nb != static_cast<uint32_t>(-1)) {
+                    cb_pop_front(cb_id_page_table, 1);
+                }
             }
         } else {
             for (uint32_t nb = local_batch_start; nb < local_batch_end; ++nb) {

@@ -337,10 +337,6 @@ SDPAProgramFactory::cached_program_t SDPAProgramFactory::create(
     // sub-mode engages automatically for causal + even q_num_chunks to pair light/heavy q_chunks
     // per core. Default (false) keeps the hierarchical parallelization.
     const bool global_q_scheduling = program_config.has_value() && program_config->global_q_scheduling;
-    if (global_q_scheduling) {
-        TT_FATAL(!is_chunked, "SDPAProgramConfig::global_q_scheduling does not support chunked prefill");
-        TT_FATAL(!use_attention_sink, "SDPAProgramConfig::global_q_scheduling does not support attention_sink");
-    }
 
     // Parallelization scheme
     // We will choose parallelization factors for batch, num_heads, and q_seq_len in that order

@@ -69,10 +69,11 @@ void kernel_main() {
         chunked_q_chunk_offset_phase_2 = get_arg_val<uint32_t>(10);
     }
 
-    // Global Q scheduling: non-chunked, no attention sink, single phase. Args sit right after
-    // chunked_q_chunk_offset_phase_1 (host packs them at slots 10..11). When disabled, slots
-    // 10..11 are unused by this kernel (num_phases==1 means arg 10 is also unused otherwise),
-    // so an unconditional read is safe — the lambda below only uses them in the enabled branch.
+    // Global Q scheduling: single phase only (num_phases==1 is pinned by the SDPA program
+    // factory). Args sit right after chunked_q_chunk_offset_phase_1 (host packs them at slots
+    // 10..11). When disabled, slots 10..11 are unused by this kernel (num_phases==1 means
+    // arg 10 is also unused otherwise), so an unconditional read is safe — the lambda below
+    // only uses them in the enabled branch.
     uint32_t global_q_start = 0;
     uint32_t global_q_count = 0;
     if constexpr (global_q_scheduling) {
@@ -195,15 +196,17 @@ void kernel_main() {
             };
 
         if constexpr (global_q_scheduling) {
-            // Global Q scheduling: flat range over B*NQH*q_num_chunks chunks. chunked prefill is
-            // rejected on host so num_phases==1 and chunked_q_chunk_offset==0. Reader/writer push
+            // Global Q scheduling: flat range over B*NQH*q_num_chunks chunks. Reader/writer push
             // CBs in this exact iter order; each call below processes one (nb, nq, q_chunk) triple.
+            // num_phases==1 is pinned by the SDPA program factory, so the chunked offset comes
+            // entirely from phase 1 (set above from runtime args / flexible chunk_start_idx tensor).
+            const uint32_t phase_chunked_offset = chunked_q_chunk_offset_phase_1;
             for (uint32_t global_q_iter = 0; global_q_iter < global_q_count; ++global_q_iter) {
                 const uint32_t remapped =
                     remap_q_index(global_q_start + global_q_iter, q_num_chunks, global_q_use_zigzag);
                 const uint32_t q_chunk_abs = remapped % q_num_chunks;
                 run_sdpa_standard_v2(
-                    /*q_chunks_per_call=*/1, /*inner_q_start=*/q_chunk_abs, /*phase_chunked_offset=*/0);
+                    /*q_chunks_per_call=*/1, /*inner_q_start=*/q_chunk_abs, phase_chunked_offset);
             }
         } else {
             for (uint32_t phase = 0; phase < num_phases; ++phase) {
