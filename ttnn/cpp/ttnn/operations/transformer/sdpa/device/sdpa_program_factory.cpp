@@ -510,6 +510,10 @@ SDPAProgramFactory::cached_program_t SDPAProgramFactory::create(
         .append_to(reader_compile_time_args);
     // Global Q scheduling tail args: [zigzag, enabled]. Order is fixed; kernel reads them via
     // chunk_start_idx_args.next_compile_time_args_offset() (+0 and +1).
+    // The "enabled" bit is hardcoded to 1 here because single-chip always uses global Q
+    // scheduling. The shared kernels still gate on this CT arg because ring_distributed
+    // passes 0 (hierarchical). Once ring is migrated, this push + the kernel's `if constexpr
+    // (global_q_scheduling)` branches + BALANCED_Q_PARALLEL all go away.
     reader_compile_time_args.push_back(static_cast<uint32_t>(global_q_zigzag));
     reader_compile_time_args.push_back(1u);
 
@@ -567,7 +571,8 @@ SDPAProgramFactory::cached_program_t SDPAProgramFactory::create(
 
     TensorAccessorArgs(output_tensor.buffer()).append_to(writer_compile_time_args);
     // Global Q scheduling tail args: [zigzag, enabled]. Order is fixed; kernel reads them via
-    // out_args.next_compile_time_args_offset() (+0 and +1).
+    // out_args.next_compile_time_args_offset() (+0 and +1). "Enabled" bit hardcoded to 1 —
+    // see the reader push site above for the deferred-migration rationale.
     writer_compile_time_args.push_back(static_cast<uint32_t>(global_q_zigzag));
     writer_compile_time_args.push_back(1u);
 
@@ -611,7 +616,8 @@ SDPAProgramFactory::cached_program_t SDPAProgramFactory::create(
         (std::uint32_t)uniform_dataformat,     // arg 32: skip reconfig when all formats match
         k_partial_col,                         // arg 33: K partial-tile col (0 = no partial)
         (std::uint32_t)global_q_zigzag,        // arg 34: global Q scheduling zigzag sub-mode
-        1u,                                    // arg 35: global Q scheduling enabled
+        1u,  // arg 35: global Q scheduling enabled — hardcoded; see reader push site for the
+             // deferred-migration rationale (removed once ring_distributed migrates).
     };
 
     TensorAccessorArgs(output_tensor.buffer()).append_to(compute_compile_time_args);
