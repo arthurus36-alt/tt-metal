@@ -113,12 +113,20 @@ def decode_forward(
 
             if page_table is not None:
                 eff_bs = effective_block_size(k_cache, config.head_dim)
+                # Per-device kv-head count of the layer's input view. When the cache
+                # was allocated for a different layer type under HMA cross-group
+                # sharing (Gemma4-26B-A4B sliding kv=8 / full kv=2 on multi-device
+                # TP) cache.padded_shape[1] disagrees with what the kernel needs to
+                # write — see paged_update_cache num_kv_heads kwarg. Mirrors
+                # split_qkv_heads_decode's local head count.
+                num_local_kv_heads = 1 if weights.kv_replicated else config.num_key_value_heads // tp
                 ttnn.experimental.paged_update_cache(
                     k_cache,
                     tt_k,
                     update_idxs_tensor=cache_pos,
                     page_table=page_table,
                     block_size=eff_bs,
+                    num_kv_heads=num_local_kv_heads,
                 )
                 ttnn.experimental.paged_update_cache(
                     v_cache,
@@ -126,6 +134,7 @@ def decode_forward(
                     update_idxs_tensor=cache_pos,
                     page_table=page_table,
                     block_size=eff_bs,
+                    num_kv_heads=num_local_kv_heads,
                 )
             else:
                 ttnn.experimental.paged_update_cache(k_cache, tt_k, update_idxs_tensor=cache_pos)
