@@ -80,6 +80,8 @@ int main(void)
 #ifndef ARCH_QUASAR
     ckernel::reset_cfg_state_id();
     ckernel::reset_dest_offset_id();
+#else
+    ckernel::trisc::_reset_dest_register_offset_();
 #endif
 
 #if defined(LLK_PROFILER)
