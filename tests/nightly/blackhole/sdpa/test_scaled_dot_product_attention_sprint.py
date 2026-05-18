@@ -195,6 +195,7 @@ K_CHUNK_SIZES = [128, 256, 512]
 # === TEST 1: PERFORMANCE SWEEP (skipped on CI) ===
 @pytest.mark.skipif(os.environ.get("CI") == "true", reason="Performance test - skip on CI")
 @pytest.mark.parametrize("dtype", [ttnn.bfloat16], ids=["bf16"])
+@pytest.mark.parametrize("global_q_scheduling", [False, True], ids=["hier", "global_q"])
 @pytest.mark.parametrize("q_chunk_size", Q_CHUNK_SIZES, ids=[f"q{s}" for s in Q_CHUNK_SIZES])
 @pytest.mark.parametrize("k_chunk_size", K_CHUNK_SIZES, ids=[f"k{s}" for s in K_CHUNK_SIZES])
 @pytest.mark.parametrize(
@@ -202,9 +203,21 @@ K_CHUNK_SIZES = [128, 256, 512]
     INPUT_SHAPES,
     ids=INPUT_IDS,
 )
-def test_sdpa_sweep_perf_impl(device, b, nh, s, d, q_chunk_size, k_chunk_size, dtype):
+def test_sdpa_sweep_perf_impl(device, b, nh, s, d, q_chunk_size, k_chunk_size, global_q_scheduling, dtype):
     # nkv = nh for non-GQA case
-    run_sdpa_noncausal(device, b, nh, nh, s, d, q_chunk_size, k_chunk_size, dtype, do_check=False)
+    run_sdpa_noncausal(
+        device,
+        b,
+        nh,
+        nh,
+        s,
+        d,
+        q_chunk_size,
+        k_chunk_size,
+        dtype,
+        do_check=False,
+        global_q_scheduling=global_q_scheduling,
+    )
 
 
 # === TEST 2: ACCURACY VERIFICATION ===
@@ -298,8 +311,10 @@ def test_sdpa_create_perf_table(b, nh, s, d):
         float_cols = ["CORE COUNT", "DEVICE KERNEL DURATION [ns]"]
         cols = ["ATTRIBUTES"]
 
-        # Build the test command for this specific configuration
-        test_id = f"k{k_chunk_size}-q{q_chunk_size}-bf16"
+        # Build the test command for this specific configuration. Hierarchical scheduling is the
+        # default behavior measured by this table; the global_q variant is compared separately in
+        # test_sdpa_perf_global_q_compare.
+        test_id = f"k{k_chunk_size}-q{q_chunk_size}-hier-bf16"
         shape_id = INPUT_IDS[INPUT_SHAPES.index([b, nh, s, d])]
         command = (
             f"pytest tests/nightly/blackhole/sdpa/"
@@ -449,7 +464,7 @@ def test_sdpa_perf_check(shape_id, q_chunk_size, k_chunk_size, expected_util):
     _b, nh, s, d = INPUT_SHAPES[idx]
 
     subdir = "ttnn_sdpa_perf_check"
-    test_id = f"k{k_chunk_size}-q{q_chunk_size}-bf16"
+    test_id = f"k{k_chunk_size}-q{q_chunk_size}-hier-bf16"
     command = (
         f"pytest tests/nightly/blackhole/sdpa/"
         f"test_scaled_dot_product_attention_sprint.py::test_sdpa_sweep_perf_impl"
@@ -486,3 +501,76 @@ def test_sdpa_perf_check(shape_id, q_chunk_size, k_chunk_size, expected_util):
         f"Math utilization {utilization:.2f}% outside band [{lower:.2f}, {upper:.2f}] "
         f"(expected {expected_util:.2f}%, margin +/- {SDPA_PERF_MARGIN*100:.1f}%)"
     )
+
+
+# === TEST 6: HIER vs GLOBAL_Q SCHEDULING COMPARISON (skipped on CI) ===
+SDPA_PERF_GLOBAL_Q_COMPARE_CONFIGS = [
+    # (shape_id, q_chunk_size, k_chunk_size)
+    ("wan2_2_1xGLX_analog", 288, 512),
+]
+
+
+@pytest.mark.skipif(os.environ.get("CI") == "true", reason="Performance test - skip on CI")
+@pytest.mark.parametrize(
+    "shape_id, q_chunk_size, k_chunk_size",
+    SDPA_PERF_GLOBAL_Q_COMPARE_CONFIGS,
+    ids=[f"{cfg[0]}-q{cfg[1]}-k{cfg[2]}" for cfg in SDPA_PERF_GLOBAL_Q_COMPARE_CONFIGS],
+)
+def test_sdpa_perf_global_q_compare(shape_id, q_chunk_size, k_chunk_size):
+    """Compare hierarchical vs global_q scheduling math utilization for a single config.
+    Runs each mode N_TRIALS times via tracy subprocess and prints per-trial + best/mean utils.
+    """
+    from tracy.process_model_log import run_device_profiler
+
+    N_TRIALS = 3
+
+    idx = INPUT_IDS.index(shape_id)
+    _b, nh, s, d = INPUT_SHAPES[idx]
+
+    subdir = "ttnn_sdpa_perf_global_q_compare"
+    float_cols = ["CORE COUNT", "DEVICE KERNEL DURATION [ns]"]
+    cols = ["ATTRIBUTES"]
+
+    results = {}  # mode -> list of (duration_ns, util)
+    for mode in ["hier", "global_q"]:
+        results[mode] = []
+        for trial in range(N_TRIALS):
+            test_id = f"k{k_chunk_size}-q{q_chunk_size}-{mode}-bf16"
+            command = (
+                f"pytest tests/nightly/blackhole/sdpa/"
+                f"test_scaled_dot_product_attention_sprint.py::test_sdpa_sweep_perf_impl"
+                f"[{shape_id}-{test_id}]"
+            )
+
+            with mock.patch.dict(os.environ, {"CI": "false"}):
+                run_device_profiler(command, subdir, device_analysis_types=["device_kernel_duration"])
+            r = post_process_ops_log(
+                subdir, float_columns=float_cols, columns=cols, op_name="", sum_vals=False, has_signposts=False
+            )
+
+            assert (
+                len(r["CORE COUNT"]) > 0 and len(r["DEVICE KERNEL DURATION [ns]"]) > 0
+            ), f"[{mode}] trial {trial + 1}: profiler returned no SDPA ops"
+
+            core_count = int(r["CORE COUNT"][0])
+            duration_ns = int(r["DEVICE KERNEL DURATION [ns]"].min())
+            util = compute_sdpa_utilization(s, d, nh, duration_ns, core_count)
+            results[mode].append((duration_ns, util))
+            logger.info(
+                f"[{mode}] trial {trial + 1}/{N_TRIALS}: " f"duration={duration_ns/1e6:.3f} ms, math_util={util:.2f}%"
+            )
+
+    print(f"\n{'='*80}")
+    print(f"SDPA global_q comparison: {shape_id} q={q_chunk_size} k={k_chunk_size} (s={s}, nh={nh}, d={d})")
+    print(f"{'='*80}")
+    print(f"| Mode      | Trials (math util)              | Best     | Mean     | Min dur (ms) |")
+    print(f"|-----------|---------------------------------|----------|----------|--------------|")
+    for mode in ["hier", "global_q"]:
+        durations_ms = [r[0] / 1e6 for r in results[mode]]
+        utils = [r[1] for r in results[mode]]
+        trials_str = ", ".join(f"{u:6.2f}%" for u in utils)
+        print(
+            f"| {mode:9s} | {trials_str:31s} | {max(utils):7.2f}% | "
+            f"{sum(utils) / len(utils):7.2f}% | {min(durations_ms):12.3f} |"
+        )
+    print(f"{'='*80}\n")
