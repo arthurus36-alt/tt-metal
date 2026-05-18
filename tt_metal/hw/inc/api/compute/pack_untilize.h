@@ -274,6 +274,10 @@ ALWI void pack_untilize_uninit(uint32_t ocb) {
 
 #ifdef ARCH_BLACKHOLE
 constexpr std::uint32_t FAST_UNTILIZE_MAX_UNIT_DIM = 4;
+// Fast untilize only uses one <=4-tile chunk at a time. Run that private
+// region with half-sync double buffering, then restore the ambient sync mode
+// in uninit so fused kernels keep their requested DEST contract.
+constexpr DstSync FAST_UNTILIZE_INTERNAL_DST_SYNC_MODE = SyncHalf;
 
 constexpr std::uint32_t fast_untilize_next_unit_dim(const std::uint32_t remaining_tiles) {
     return (remaining_tiles > 5) ? 4 : (remaining_tiles == 5) ? 2 : remaining_tiles;
@@ -300,17 +304,21 @@ ALWI void fast_untilize_init(uint32_t icb, uint32_t ocb, uint32_t call_line = __
     constexpr std::uint32_t first_unit_dim = fast_untilize_next_unit_dim(full_ct_dim);
 
     // Fast-untilize can run immediately after other LLKs (for example matmul
-    // bias pack_tile into the same CB). Re-enter the normal math/pack sync
+    // bias pack_tile into the same CB). Re-enter a known math/pack sync
     // contract so stale dest offset/semaphore state cannot leak into the fast
     // packer.
-    MATH((llk_math_pack_sync_init<DST_ACCUM_MODE>()));
-    PACK((llk_pack_dest_init<DST_ACCUM_MODE, PackMode::Default>()));
+    MATH((_llk_math_pack_sync_init_<FAST_UNTILIZE_INTERNAL_DST_SYNC_MODE, DST_ACCUM_MODE>()));
+    PACK((_llk_pack_dest_init_<FAST_UNTILIZE_INTERNAL_DST_SYNC_MODE, DST_ACCUM_MODE>()));
     UNPACK((llk_unpack_fast_untilize_init<DST_ACCUM_MODE>(
         icb, fast_untilize_is_bfp_b_input_format(unpack_src_format[get_operand_id(icb)]) ? 1 : first_unit_dim)));
     MATH((llk_math_fast_untilize_init<DST_ACCUM_MODE>(icb)));
     PACK((llk_pack_reconfig_data_format_disaggregated<DST_ACCUM_MODE>(ocb, FACE_R_DIM, 4)));
-    PACK((llk_pack_fast_untilize_init<DST_SYNC_MODE, DST_ACCUM_MODE, FAST_UNTILIZE_MAX_UNIT_DIM, full_ct_dim>(ocb)));
-    PACK((llk_init_packer_dest_offset_registers<PackMode::Untilize, false>()));
+    PACK((llk_pack_fast_untilize_init<
+          FAST_UNTILIZE_INTERNAL_DST_SYNC_MODE,
+          DST_ACCUM_MODE,
+          FAST_UNTILIZE_MAX_UNIT_DIM,
+          full_ct_dim>(ocb)));
+    PACK((_llk_init_packer_dest_offset_registers_<FAST_UNTILIZE_INTERNAL_DST_SYNC_MODE>()));
 #else
     pack_untilize_init<full_ct_dim, full_ct_dim>(icb, ocb, call_line);
 #endif
@@ -337,7 +345,7 @@ ALWI void fast_untilize_block(
         const std::uint32_t remaining_tiles = full_ct_dim - tiles_done;
         const std::uint32_t unit_dim = fast_untilize_next_unit_dim(remaining_tiles);
 
-        MATH((llk_math_wait_for_dest_available()));
+        MATH((_llk_math_wait_for_dest_available_<FAST_UNTILIZE_INTERNAL_DST_SYNC_MODE>()));
 
 #ifdef TRISC_UNPACK
         {
@@ -355,7 +363,7 @@ ALWI void fast_untilize_block(
 #endif
 
         MATH((llk_math_fast_untilize_block<DST_ACCUM_MODE>(0, icb, unit_dim)));
-        MATH((llk_math_dest_section_done<DST_ACCUM_MODE>()));
+        MATH((_llk_math_dest_section_done_<FAST_UNTILIZE_INTERNAL_DST_SYNC_MODE, DST_ACCUM_MODE>()));
 
         PACK((llk_packer_wait_for_math_done()));
 #ifdef TRISC_PACK
@@ -369,15 +377,18 @@ ALWI void fast_untilize_block(
             const std::uint32_t chunk_address = output_row_address + chunk_offset;
 
             if constexpr (full_ct_dim <= FAST_UNTILIZE_MAX_UNIT_DIM) {
-                llk_pack_fast_untilize_block_at_address<FAST_UNTILIZE_MAX_UNIT_DIM, DST_SYNC_MODE>(
-                    chunk_address, unit_dim, prev_pack_unit_dim);
+                llk_pack_fast_untilize_block_at_address<
+                    FAST_UNTILIZE_MAX_UNIT_DIM,
+                    FAST_UNTILIZE_INTERNAL_DST_SYNC_MODE>(chunk_address, unit_dim, prev_pack_unit_dim);
             } else {
-                llk_pack_fast_untilize_block_strided_at_address<FAST_UNTILIZE_MAX_UNIT_DIM, full_ct_dim, DST_SYNC_MODE>(
-                    chunk_address, unit_dim, prev_pack_unit_dim);
+                llk_pack_fast_untilize_block_strided_at_address<
+                    FAST_UNTILIZE_MAX_UNIT_DIM,
+                    full_ct_dim,
+                    FAST_UNTILIZE_INTERNAL_DST_SYNC_MODE>(chunk_address, unit_dim, prev_pack_unit_dim);
             }
         }
 #endif
-        PACK((llk_pack_dest_section_done<DST_ACCUM_MODE>()));
+        PACK((_llk_pack_dest_section_done_<FAST_UNTILIZE_INTERNAL_DST_SYNC_MODE, DST_ACCUM_MODE>()));
 
         tiles_done += unit_dim;
     }
@@ -409,10 +420,19 @@ ALWI void fast_untilize_uninit(uint32_t icb, uint32_t ocb) {
 
     UNPACK((llk_unpack_fast_untilize_uninit()));
     MATH((llk_math_fast_untilize_uninit<DST_ACCUM_MODE>(icb)));
+    // Leave the math/pack semaphore in the mode requested by the kernel so
+    // a following LLK does not inherit fast-untilize's private half-sync.
+    if constexpr (DST_SYNC_MODE != FAST_UNTILIZE_INTERNAL_DST_SYNC_MODE) {
+        MATH((_llk_math_pack_sync_init_<DST_SYNC_MODE, DST_ACCUM_MODE>()));
+    }
     PACK((llk_init_packer_dest_offset_registers<PackMode::Default>()));
     PACK((llk_pack_reconfig_data_format<DST_ACCUM_MODE>(ocb)));
     PACK((llk_pack_init(ocb)));
-    PACK((llk_pack_fast_untilize_uninit<DST_SYNC_MODE, DST_ACCUM_MODE, FAST_UNTILIZE_MAX_UNIT_DIM, full_ct_dim>(ocb)));
+    PACK((llk_pack_fast_untilize_uninit<
+          FAST_UNTILIZE_INTERNAL_DST_SYNC_MODE,
+          DST_ACCUM_MODE,
+          FAST_UNTILIZE_MAX_UNIT_DIM,
+          full_ct_dim>(ocb)));
 #else
     pack_untilize_uninit(ocb);
 #endif

@@ -1321,3 +1321,57 @@ Next perf ideas, in preferred order:
 2. Re-check pack-heavy BFP variants after any FullSync or pack sequencing work.
 3. Keep destination-programming reuse deferred unless common production shapes
    justify the extra API surface.
+
+### 2026-05-18 internal half-sync for fast-untilize
+
+Goal: remove avoidable FullSync overhead from fast-untilize while preserving
+the external DEST sync contract expected by fused kernels.
+
+Kept implementation:
+- Add `FAST_UNTILIZE_INTERNAL_DST_SYNC_MODE = SyncHalf`.
+- Initialize math/pack sync, DEST offsets, and fast packer state under the
+  internal HalfSync mode.
+- Use the internal mode for all fast-untilize wait/done and pack-block calls.
+- In uninit, restore the requested ambient `DST_SYNC_MODE` on the math side
+  when it differs from the private mode. The pack side restores default DEST
+  offsets through the ambient `llk_init_packer_dest_offset_registers` wrapper.
+- Mirror this behavior in the LLK harness with
+  `FAST_UNTILIZE_INTERNAL_DEST_SYNC`.
+
+Validation:
+- Focused external FullSync smoke for FP16/BFP8/BFP4 inputs, dest16/dest32
+  where valid, `rt=4`, `ct=8`, row-id -> `6 passed`.
+- Full LLK correctness:
+  `tt_metal/tt-llk/tests/python_tests/test_fast_untilize.py::test_fast_untilize`
+  -> `1080 passed in 197.82s`.
+- Overflow guard:
+  `test_fast_untilize.py::test_fast_untilize_overflow_guard`
+  -> `1080 passed in 326.36s`.
+- Target perf: `rt=4`, `ct=8`, `loop_factor=16` -> `18 passed`.
+- Wider perf: `rt=4`, all supported `ct`, `loop_factor=16` -> `180 passed`.
+- Production repros passed: conv3d `kernel_111`, conv3d `kernel_333`, and the
+  fold/permute DRAM tensor hang case.
+
+Perf result at `rt=4`, `ct=8`, `loop_factor=16`:
+
+| input -> output | dest | sync | baseline cyc/tile | candidate cyc/tile | delta |
+|:---|:---:|:---:|---:|---:|---:|
+| `Float16_b -> Float16_b` | 16 | Full | `61.20` | `42.60` | `-30.39%` |
+| `Float16_b -> Float16_b` | 16 | Half | `42.60` | `42.60` | `+0.01%` |
+| `Float16_b -> Float16_b` | 32 | Full | `66.95` | `42.64` | `-36.31%` |
+| `Float16_b -> Float16_b` | 32 | Half | `42.64` | `42.64` | `0.00%` |
+| `Bfp8_b -> Float16_b` | 32 | Full | `67.04` | `42.72` | `-36.27%` |
+| `Bfp8_b -> Float16_b` | 32 | Half | `42.72` | `42.72` | `0.00%` |
+| `Bfp4_b -> Float16_b` | 32 | Full | `67.03` | `42.71` | `-36.27%` |
+| `Bfp4_b -> Float16_b` | 32 | Half | `42.71` | `42.71` | `0.00%` |
+| `Float32 -> Float32` | 32 | Full | `90.08` | `59.08` | `-34.41%` |
+| `Float32 -> Float32` | 32 | Half | `59.08` | `59.08` | `0.00%` |
+
+Wider `rt=4`, all-ct comparison: `162` matched rows, worst L1 delta `+0.02%`,
+no regressions above `2%`, and best FullSync wins up to `~37%`.
+
+Conclusion:
+- Keep internal HalfSync as the default fast-untilize implementation.
+- FullSync was an avoidable single-buffering cost for this private <=4-tile
+  region. Restoring the ambient sync mode in uninit keeps the fused-kernel
+  contract intact without paying FullSync inside the hot path.
