@@ -37,3 +37,136 @@
       tier: 1
   owner_id: U09LTAPEU2U # Viktor Pus
   team: models
+
+# ── Tier-1 seqlen sweeps ────────────────────────────────────────────────────────
+
+- name: Llama 3.1-8B seqlen sweep
+  cmd: |
+    export HF_MODEL=meta-llama/Llama-3.1-8B-Instruct TT_CACHE_PATH=/mnt/MLPerf/huggingface/tt_cache/meta-llama/Llama-3.1-8B-Instruct
+    pytest --timeout 7200 models/tt_transformers/demo/simple_text_demo.py -k "performance-seqlen-sweep"
+  model: llama3.1-8b
+  skus:
+    wh_n150:
+      timeout: 120
+      tier: 1
+    bh_p150:
+      timeout: 120
+      tier: 1
+  owner_id: U03PUAKE719 # Miguel Tairum Cruz
+  team: models
+
+# TODO(#37424): Llama 3.3-70B Galaxy (tier 1) seqlen sweep — needs seqlen-sweep
+#               parametrize entry in models/demos/llama3_70b_galaxy/demo/text_demo.py
+
+# TODO(#37491): Qwen3-32B Galaxy (tier 1) seqlen sweep — needs seqlen-sweep
+#               parametrize entry in models/demos/llama3_70b_galaxy/demo/text_demo.py
+
+# TODO(#37516): GPT-OSS 120B Galaxy (tier 1) seqlen sweep — needs seqlen-sweep
+#               parametrize entry in models/demos/gpt_oss/demo/text_demo.py
+
+# TODO(#37527): Whisper N150/P150 (tier 1) seqlen sweep — needs audio-duration sweep
+#               implementation in models/demos/audio/whisper/demo/demo.py
+
+# TODO(Deepseek tier 1 Galaxy): seqlen sweep not yet implemented — multihost setup
+#                                requires separate design
+
+# ── Tier-2 seqlen sweeps ────────────────────────────────────────────────────────
+
+- name: Llama 3.3-70B seqlen sweep (LoudBox)
+  cmd: |
+    export HF_MODEL=meta-llama/Llama-3.3-70B-Instruct TT_CACHE_PATH=/mnt/MLPerf/huggingface/tt_cache/meta-llama/Llama-3.3-70B-Instruct
+    pytest --timeout 14400 models/tt_transformers/demo/simple_text_demo.py -k "performance-seqlen-sweep"
+  model: llama3.3-70b
+  skus:
+    wh_llmbox_perf:
+      timeout: 240
+      tier: 2
+  owner_id: U03PUAKE719 # Miguel Tairum Cruz
+  team: models
+
+- name: Qwen3-32B seqlen sweep (LoudBox)
+  cmd: |
+    export HF_MODEL=Qwen/Qwen3-32B TT_CACHE_PATH=/mnt/MLPerf/huggingface/tt_cache/Qwen/Qwen3-32B
+    pytest --timeout 10800 models/tt_transformers/demo/simple_text_demo.py -k "performance-seqlen-sweep"
+  model: qwen3-32b
+  skus:
+    wh_llmbox_perf:
+      timeout: 180
+      tier: 2
+  owner_id: U03PUAKE719 # Miguel Tairum Cruz
+  team: models
+
+- name: Qwen2.5-32B seqlen sweep (LoudBox)
+  cmd: |
+    export HF_MODEL=Qwen/Qwen2.5-32B-Instruct TT_CACHE_PATH=/mnt/MLPerf/huggingface/tt_cache/Qwen/Qwen2.5-32B-Instruct
+    pytest --timeout 10800 models/tt_transformers/demo/simple_text_demo.py -k "performance-seqlen-sweep"
+  model: qwen2.5-32b
+  skus:
+    wh_llmbox_perf:
+      timeout: 180
+      tier: 2
+  owner_id: U03PUAKE719 # Miguel Tairum Cruz
+  team: models
+
+- name: Qwen2.5-Coder-32B seqlen sweep (LoudBox)
+  cmd: |
+    export HF_MODEL=Qwen/Qwen2.5-Coder-32B-Instruct TT_CACHE_PATH=/mnt/MLPerf/huggingface/tt_cache/Qwen/Qwen2.5-Coder-32B-Instruct
+    pytest --timeout 10800 models/tt_transformers/demo/simple_text_demo.py -k "performance-seqlen-sweep"
+  model: qwen2.5-coder-32b
+  skus:
+    wh_llmbox_perf:
+      timeout: 180
+      tier: 2
+  owner_id: U03PUAKE719 # Miguel Tairum Cruz
+  team: models
+
+- name: Mistral-7B seqlen sweep
+  cmd: |
+    export HF_MODEL=mistralai/Mistral-7B-Instruct-v0.3 TT_CACHE_PATH=/mnt/MLPerf/huggingface/tt_cache/mistralai/Mistral-7B-Instruct-v0.3
+    pytest --timeout 7200 models/tt_transformers/demo/simple_text_demo.py -k "performance-seqlen-sweep"
+  model: mistral-7b
+  skus:
+    wh_n150:
+      timeout: 120
+      tier: 2
+  owner_id: U03PUAKE719 # Miguel Tairum Cruz
+  team: models
+
+- name: Mixtral-8x7B seqlen sweep (LoudBox)
+  cmd: |
+    export HF_MODEL=mistralai/Mixtral-8x7B-Instruct-v0.1 TT_CACHE_PATH=/mnt/MLPerf/huggingface/tt_cache/mistralai/Mixtral-8x7B-Instruct-v0.1
+    pytest --timeout 10800 models/tt_transformers/demo/simple_text_demo.py -k "performance-seqlen-sweep"
+  model: mixtral-8x7b
+  skus:
+    wh_llmbox_perf:
+      timeout: 180
+      tier: 2
+  owner_id: U03PUAKE719 # Miguel Tairum Cruz
+  team: models
+
+# TODO(GPT-OSS 20B tier 2): seqlen sweep — needs seqlen-sweep parametrize entry
+#                             in models/demos/gpt_oss/demo/text_demo.py
+
+# TODO(Llama 3.2-90B-VL tier 2): seqlen sweep — needs seqlen-sweep support
+#                                  in models/tt_transformers/demo/simple_vision_demo.py
+
+# TODO(Qwen2.5-72B-VL tier 2): seqlen sweep — needs seqlen-sweep support
+#                                in models/demos/qwen25_vl/demo/demo.py
+
+# TODO(Gemma-3-4B tier 2): seqlen sweep — needs seqlen-sweep parametrize entry
+#                            in models/demos/multimodal/gemma3/demo/text_demo.py
+
+# TODO(Gemma-3-27B tier 2): seqlen sweep — needs seqlen-sweep parametrize entry
+#                             in models/demos/multimodal/gemma3/demo/text_demo.py
+
+# TODO(Gemma-4-E2B tier 2): seqlen sweep — needs seqlen-sweep parametrize entry
+#                             in models/demos/gemma4/demo/text_demo.py
+
+# TODO(Gemma-4-E4B tier 2): seqlen sweep — needs seqlen-sweep parametrize entry
+#                             in models/demos/gemma4/demo/text_demo.py
+
+# TODO(Gemma-4-26B-A4B tier 2): seqlen sweep — needs seqlen-sweep parametrize entry
+#                                 in models/demos/gemma4/demo/text_demo.py
+
+# TODO(Gemma-4-31B tier 2): seqlen sweep — needs seqlen-sweep parametrize entry
+#                             in models/demos/gemma4/demo/text_demo.py
