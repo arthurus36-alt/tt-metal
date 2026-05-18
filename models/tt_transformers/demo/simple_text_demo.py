@@ -785,6 +785,35 @@ _trace_region_size = (
             None,  # num_layers, if None -> defaults to all layers
             "full",  # performs both prefill and decode
         ),
+        (  # seqlen-sweep [CI-only] - sweeps all powers-of-two context lengths (1k→128k), prefill-only
+            # Phase 1: run to completion without crashing; no output validation
+            (  # input_prompts: one file per seqlen step, powers of two from 1k to 128k
+                "models/tt_transformers/demo/sample_prompts/input_data_long_1k.json",
+                "models/tt_transformers/demo/sample_prompts/input_data_long_2k.json",
+                "models/tt_transformers/demo/sample_prompts/input_data_long_4k.json",
+                "models/tt_transformers/demo/sample_prompts/input_data_long_8k.json",
+                "models/tt_transformers/demo/sample_prompts/input_data_long_16k.json",
+                "models/tt_transformers/demo/sample_prompts/input_data_long_32k.json",
+                "models/tt_transformers/demo/sample_prompts/input_data_long_64k.json",
+                "models/tt_transformers/demo/sample_prompts/input_data_long_128k.json",
+            ),
+            True,  # instruct mode
+            8,  # repeat_batches: one per seqlen step (1k, 2k, 4k, 8k, 16k, 32k, 64k, 128k)
+            128 * 1024,  # max_seq_len: load model at maximum context window
+            1,  # batch_size
+            1,  # max_generated_tokens: Phase 1 — prefill-only, no output validation
+            True,  # paged_attention
+            {"page_block_size": 64, "page_max_num_blocks_per_dp": 2048},  # page_params
+            {"temperature": 0, "top_p": 0.08, "top_k": 32},  # sampling_params (argmax)
+            False,  # stop_at_eos
+            True,  # ci_only
+            1,  # data_parallel
+            False,  # token_accuracy
+            False,  # stress_test
+            True,  # enable_trace
+            None,  # num_layers, if None -> defaults to all layers
+            "prefill",  # mode: Phase 1 is prefill-only
+        ),
         (  # device-perf - Measures device performance of a prefill or decode run (by default runs prefill but test_device_perf uses args to override defaults)
             "models/tt_transformers/demo/sample_prompts/input_data_questions_prefill_128.json",  # input_prompts
             False,  # instruct mode
@@ -827,6 +856,7 @@ _trace_region_size = (
         "ci-eval-1",  # CI 6 repeat batches with output comparison
         "ci-eval-32",  # CI batch 32 with 3 repeat batches and output comparison
         "ci-long-context-16k",  # 16k context, max_seq_len=32k, used for testing --max_seq_len=16k override
+        "seqlen-sweep",  # sweeps all powers-of-two context lengths (1k→128k), prefill-only, Phase 1: no output validation
         "device-perf",  # Device perf
     ],
 )
@@ -1011,7 +1041,13 @@ def test_demo_text(
 
     logger.info(f"Reading inputs...")
     profiler.start("loading_inputs")
-    if len(input_prompts) == 1:  # Manual input
+    seqlen_sweep_files = None
+    if isinstance(input_prompts, tuple) and all(isinstance(f, str) for f in input_prompts):
+        # Seqlen sweep mode: each element is a file path for a separate batch
+        seqlen_sweep_files = input_prompts
+        # Load the first file so input_prompts is valid for model initialisation
+        input_prompts, all_prompts = load_inputs(seqlen_sweep_files[0], global_batch_size, instruct)
+    elif len(input_prompts) == 1:  # Manual input
         input_prompts = input_prompts * global_batch_size
         all_prompts = input_prompts
     else:  # Inputs from file
@@ -1070,19 +1106,27 @@ def test_demo_text(
         input_prompts[0] = token_acc.prepare_ref_tokens(tokenizer)
 
     repeat_batch_prompts = []
-    for i in range(repeat_batches):
-        # For token accuracy, use input_prompts without rotation
-        if token_accuracy:
-            repeat_batch_prompts.append(input_prompts)
-        else:
-            global_prompts_for_batch = [all_prompts[(j + i) % len(all_prompts)] for j in range(len(all_prompts))][
-                : batch_size * data_parallel
-            ]
+    if seqlen_sweep_files is not None:
+        # Seqlen sweep mode: each batch uses a distinct input file at a different context length
+        for seqlen_file in seqlen_sweep_files:
+            batch_prompts, _ = load_inputs(seqlen_file, global_batch_size, instruct)
             repeat_batch_prompts.append(
-                select_local_data_parallel_items(
-                    global_prompts_for_batch, batch_size, data_parallel, local_submesh_indices
-                )
+                select_local_data_parallel_items(batch_prompts, batch_size, data_parallel, local_submesh_indices)
             )
+    else:
+        for i in range(repeat_batches):
+            # For token accuracy, use input_prompts without rotation
+            if token_accuracy:
+                repeat_batch_prompts.append(input_prompts)
+            else:
+                global_prompts_for_batch = [all_prompts[(j + i) % len(all_prompts)] for j in range(len(all_prompts))][
+                    : batch_size * data_parallel
+                ]
+                repeat_batch_prompts.append(
+                    select_local_data_parallel_items(
+                        global_prompts_for_batch, batch_size, data_parallel, local_submesh_indices
+                    )
+                )
 
     num_tokens_generated_decode = []
 
