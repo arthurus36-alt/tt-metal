@@ -12,8 +12,9 @@
 //     KernelSpecs of this same source with each group's `NCHt` bound as a CTA,
 //     placed in two WorkUnitSpecs. This preserves compile-time outer-loop unrolling.
 //   - DataflowBuffers are bound by name. cb_var is always bound; cb_scaled is
-//     always bound but only used when do_scale is true (the if constexpr block
-//     gates its references; the wrapper itself just stores the buffer id).
+//     bound only when do_scale is true — both the wrapper and all uses live inside
+//     `if constexpr (do_scale)`, so the dfb::scaled_w / dfb::scaled_r constants
+//     don't need to exist in the !do_scale build.
 
 #include <cstdint>
 
@@ -40,20 +41,18 @@ void kernel_main() {
     experimental::DataflowBuffer dfb_input(dfb::input);
     experimental::DataflowBuffer dfb_scaler(dfb::scaler);
     experimental::DataflowBuffer dfb_output(dfb::output);
-    // The var and scaled DFBs are produced AND consumed by this same kernel; Metal 2.0
-    // requires distinct local_accessor_names for the producer and consumer bindings on
-    // the same kernel, so each has a `_w` (writer/producer) and `_r` (reader/consumer)
-    // wrapper. On Gen1 both ids resolve to the same underlying CB.
+    // The var DFB is produced AND consumed by this same kernel; Metal 2.0 requires
+    // distinct local_accessor_names for the producer and consumer bindings on the
+    // same kernel, so each has a `_w` (writer/producer) and `_r` (reader/consumer)
+    // wrapper. On Gen1 both ids resolve to the same underlying CB. The scaled DFB
+    // follows the same pattern but is gated on do_scale (see below).
     experimental::DataflowBuffer dfb_var_writer(dfb::var_w);
     experimental::DataflowBuffer dfb_var_reader(dfb::var_r);
-    experimental::DataflowBuffer dfb_scaled_writer(dfb::scaled_w);
-    experimental::DataflowBuffer dfb_scaled_reader(dfb::scaled_r);
 
     const uint32_t cb_in = dfb_input.get_id();
     const uint32_t cb_scalar = dfb_scaler.get_id();
     const uint32_t cb_out = dfb_output.get_id();
-    const uint32_t cb_var = dfb_var_writer.get_id();        // == dfb_var_reader.get_id()
-    const uint32_t cb_scaled = dfb_scaled_writer.get_id();  // == dfb_scaled_reader.get_id()
+    const uint32_t cb_var = dfb_var_writer.get_id();  // == dfb_var_reader.get_id()
 
     // Welford's LLK uses three adjacent DST registers:
     //   input_dst (0) — scratch for the current transposed input tile,
@@ -94,6 +93,14 @@ void kernel_main() {
         // DST cycles because LREGs are separate from the DST register file.
         for (uint32_t wt = 0; wt < Wt; ++wt) {
             if constexpr (do_scale) {
+                // The scaled DFB is bound only when do_scale is true (see the host
+                // factory's conditional dfb_bindings); the wrapper and its uses live
+                // entirely inside this if constexpr block so dfb::scaled_w/scaled_r
+                // don't need to exist in the !do_scale build.
+                experimental::DataflowBuffer dfb_scaled_writer(dfb::scaled_w);
+                experimental::DataflowBuffer dfb_scaled_reader(dfb::scaled_r);
+                const uint32_t cb_scaled = dfb_scaled_writer.get_id();
+
                 // Scale step: multiply input tile by scalar.
                 dfb_input.wait_front(onetile);
                 tile_regs_acquire();

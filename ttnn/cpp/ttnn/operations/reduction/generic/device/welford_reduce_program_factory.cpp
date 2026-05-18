@@ -394,26 +394,27 @@ ttnn::device_operation::ProgramArtifacts WelfordReduceProgramFactory::create_pro
     if (reduce_w) {
         const tt::DataFormat var_data_format = fp32_dest_acc_en ? tt::DataFormat::Float32 : tt::DataFormat::Float16_b;
         const uint32_t var_single_tile_size = tile_size(var_data_format);
-        dataflow_buffers.insert(
-            dataflow_buffers.end(),
-            {
-                m2::DataflowBufferSpec{
-                    .unique_id = VAR_DFB,
-                    .entry_size = var_single_tile_size,
-                    .num_entries = kNumScratchEntries,
-                    .data_format_metadata = var_data_format,
-                    .tile_format_metadata = a.tensor_spec().tile(),
-                    .disable_implicit_sync = true,
-                },
-                m2::DataflowBufferSpec{
-                    .unique_id = SCALED_DFB,
-                    .entry_size = input_single_tile_size,
-                    .num_entries = kNumScratchEntries,
-                    .data_format_metadata = input_cb_data_format,
-                    .tile_format_metadata = a.tensor_spec().tile(),
-                    .disable_implicit_sync = true,
-                },
+        dataflow_buffers.push_back(m2::DataflowBufferSpec{
+            .unique_id = VAR_DFB,
+            .entry_size = var_single_tile_size,
+            .num_entries = kNumScratchEntries,
+            .data_format_metadata = var_data_format,
+            .tile_format_metadata = a.tensor_spec().tile(),
+            .disable_implicit_sync = true,
+        });
+        // SCALED_DFB is only used when do_scale is true; conditionally bound so we
+        // don't allocate a tile of L1 per core when the path isn't taken. The kernel
+        // gates both the wrapper declaration and all uses on the same do_scale CTA.
+        if (do_scale) {
+            dataflow_buffers.push_back(m2::DataflowBufferSpec{
+                .unique_id = SCALED_DFB,
+                .entry_size = input_single_tile_size,
+                .num_entries = kNumScratchEntries,
+                .data_format_metadata = input_cb_data_format,
+                .tile_format_metadata = a.tensor_spec().tile(),
+                .disable_implicit_sync = true,
             });
+        }
     }
     if (reduce_hw) {
         constexpr tt::DataFormat partial_data_format = tt::DataFormat::Float32;
@@ -635,9 +636,9 @@ ttnn::device_operation::ProgramArtifacts WelfordReduceProgramFactory::create_pro
             },
         };
         if (reduce_w) {
-            // The var and scaled DFBs are produced AND consumed by this same kernel. Metal 2.0
-            // requires distinct local_accessor_names per binding even when both endpoints are
-            // the same kernel; on Gen1 the two accessor ids resolve to the same underlying CB.
+            // The var DFB is produced AND consumed by this same kernel. Metal 2.0 requires
+            // distinct local_accessor_names per binding even when both endpoints are the
+            // same kernel; on Gen1 the two accessor ids resolve to the same underlying CB.
             compute.dfb_bindings.insert(
                 compute.dfb_bindings.end(),
                 {
@@ -653,19 +654,28 @@ ttnn::device_operation::ProgramArtifacts WelfordReduceProgramFactory::create_pro
                         .endpoint_type = m2::KernelSpec::DFBEndpointType::CONSUMER,
                         .access_pattern = m2::DFBAccessPattern::STRIDED,
                     },
-                    m2::KernelSpec::DFBBinding{
-                        .dfb_spec_name = SCALED_DFB,
-                        .local_accessor_name = "scaled_w",
-                        .endpoint_type = m2::KernelSpec::DFBEndpointType::PRODUCER,
-                        .access_pattern = m2::DFBAccessPattern::STRIDED,
-                    },
-                    m2::KernelSpec::DFBBinding{
-                        .dfb_spec_name = SCALED_DFB,
-                        .local_accessor_name = "scaled_r",
-                        .endpoint_type = m2::KernelSpec::DFBEndpointType::CONSUMER,
-                        .access_pattern = m2::DFBAccessPattern::STRIDED,
-                    },
                 });
+            // SCALED_DFB is only bound when do_scale is true; the kernel gates both the
+            // wrapper declaration and uses on the same do_scale CTA, so dfb::scaled_w/_r
+            // don't need to exist when do_scale is false. Saves a tile of L1 per core.
+            if (do_scale) {
+                compute.dfb_bindings.insert(
+                    compute.dfb_bindings.end(),
+                    {
+                        m2::KernelSpec::DFBBinding{
+                            .dfb_spec_name = SCALED_DFB,
+                            .local_accessor_name = "scaled_w",
+                            .endpoint_type = m2::KernelSpec::DFBEndpointType::PRODUCER,
+                            .access_pattern = m2::DFBAccessPattern::STRIDED,
+                        },
+                        m2::KernelSpec::DFBBinding{
+                            .dfb_spec_name = SCALED_DFB,
+                            .local_accessor_name = "scaled_r",
+                            .endpoint_type = m2::KernelSpec::DFBEndpointType::CONSUMER,
+                            .access_pattern = m2::DFBAccessPattern::STRIDED,
+                        },
+                    });
+            }
         }
         if (reduce_hw) {
             compute.dfb_bindings.insert(
