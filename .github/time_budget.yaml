@@ -227,9 +227,13 @@ models:
     bh_p300: 800
     bh_quietbox_2: 280
   sweep:
-    wh_n150: 10
-    wh_llmbox_perf: 30
-    wh_galaxy: 30
+    # TODO: agree on defined time budgets for sweep tests per SKU
+    wh_n150: 120
+    wh_p150: 120
+    bh_p150: 120
+    wh_llmbox_perf: 300
+    wh_galaxy: 300
+    bh_galaxy: 300
 
 umd:
   unit:
