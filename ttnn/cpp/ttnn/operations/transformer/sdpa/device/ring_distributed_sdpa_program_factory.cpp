@@ -243,6 +243,10 @@ RingDistributedSdpaMeshWorkloadFactory::cached_program_t RingDistributedSdpaMesh
         .append_to(reader_compile_time_args);                  // page table
     TensorAccessorArgs().append_to(reader_compile_time_args);  // attention sink (not used in ring)
     TensorAccessorArgs().append_to(reader_compile_time_args);  // chunk_start_idx_tensor (ring has no flexible chunked)
+    // Global Q scheduling tail args (shared kernels read these unconditionally).
+    // Ring uses the hierarchical path: zigzag off, scheduling disabled.
+    reader_compile_time_args.push_back(0u);  // global_q_use_zigzag
+    reader_compile_time_args.push_back(0u);  // global_q_scheduling
 
     std::vector<uint32_t> writer_compile_time_args = {
         // interleaved accessor args
@@ -272,6 +276,10 @@ RingDistributedSdpaMeshWorkloadFactory::cached_program_t RingDistributedSdpaMesh
         0,      // arg 23: k_partial_col — non-streaming, no partial mask emitted
     };
     TensorAccessorArgs(output_tensor.buffer()).append_to(writer_compile_time_args);
+    // Global Q scheduling tail args (shared kernels read these unconditionally).
+    // Ring uses the hierarchical path: zigzag off, scheduling disabled.
+    writer_compile_time_args.push_back(0u);  // global_q_use_zigzag
+    writer_compile_time_args.push_back(0u);  // global_q_scheduling
 
     std::vector<uint32_t> compute_compile_time_args = {
         // matmul args
@@ -307,6 +315,10 @@ RingDistributedSdpaMeshWorkloadFactory::cached_program_t RingDistributedSdpaMesh
         0,          //(std::uint32_t)use_attention_sink,
         0,          //(std::uint32_t)use_streaming_compute — always false for ring distributed (causal)
         valid_Skt,  // arg 31: unpadded K tiles for streaming padded_k_tiles
+        0u,         // arg 32: uniform_dataformat — unused on ring's non-streaming path
+        0u,         // arg 33: k_partial_col — unused on ring's non-streaming path
+        0u,         // arg 34: global_q_use_zigzag — ring uses hierarchical
+        0u,         // arg 35: global_q_scheduling — ring uses hierarchical
     };
     TensorAccessorArgs(output_tensor.buffer()).append_to(compute_compile_time_args);
 
