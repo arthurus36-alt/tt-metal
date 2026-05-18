@@ -9,10 +9,10 @@
 #ifndef ARCH_QUASAR
 #include "ckernel_globals.h" // Only for WH/BH
 #include "llk_assert.h"
-// Necessary for ckernel variables
-#include "ckernel_helper.h" // Only for WH/BH
 #endif
 #include "boot.h"
+// Necessary for ckernel variables
+#include "ckernel_helper.h" // Only for WH/BH
 #include "profiler.h"
 
 #ifdef LLK_PROFILER

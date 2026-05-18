@@ -110,6 +110,20 @@ SECTIONS
     SORT(CONSTRUCTORS)
     *(.data1)
     *(.got.plt) *(.igot.plt) *(.got) *(.igot)
+    /*
+     * Thread-local storage image. Each TRISC ELF is single-threaded and has its own
+     * private LDM, so `thread_local` is effectively a plain global here. We keep the
+     * sections (rather than discarding them) so RISC-V tprel relocations resolve to
+     * real memory, and set `tp = __tdata_start` in crt0. `.tbss` is zero-initialized,
+     * but living inside the loaded `.ldm_data` region the existing crt0 copy carries
+     * the zero bytes from `.loader_init` for us.
+     */
+    . = ALIGN(4);
+    __tdata_start = .;
+    *(.tdata .tdata.* .gnu.linkonce.td.*)
+    *(.tbss .tbss.* .gnu.linkonce.tb.*) *(.tcommon)
+    . = ALIGN(4);
+    __tdata_end = .;
     . = ALIGN(4);
     __ldm_data_end = .;
     __ldm_bss_start = .;
@@ -204,8 +218,6 @@ SECTIONS
         *(.rela.rodata .rela.rodata.* .rela.gnu.linkonce.r.*)
         *(.rela.data.rel.ro .rela.data.rel.ro.* .rela.gnu.linkonce.d.rel.ro.*)
         *(.rela.data .rela.data.* .rela.gnu.linkonce.d.*)
-        *(.rela.tdata .rela.tdata.* .rela.gnu.linkonce.td.*)
-        *(.rela.tbss .rela.tbss.* .rela.gnu.linkonce.tb.*)
         *(.rela.ctors)
         *(.rela.dtors)
         *(.rela.got)
@@ -227,8 +239,6 @@ SECTIONS
         *(.gnu_extab)
         *(.gcc_except_table .gcc_except_table.*)
         *(.exception_ranges .exception_ranges*)
-        *(.tdata .tdata.* .gnu.linkonce.td.*)
-        *(.tbss .tbss.* .gnu.linkonce.tb.*) *(.tcommon)
         *(.jcr)
         *(.got.plt) *(.igot.plt) *(.got) *(.igot)
   }

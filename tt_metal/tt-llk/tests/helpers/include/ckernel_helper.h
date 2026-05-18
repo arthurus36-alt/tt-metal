@@ -20,8 +20,15 @@ volatile std::uint32_t tt_reg_ptr *mailbox_base[4] = {
     reinterpret_cast<volatile std::uint32_t tt_reg_ptr *>(TENSIX_MAILBOX2_BASE),
     reinterpret_cast<volatile std::uint32_t tt_reg_ptr *>(TENSIX_MAILBOX3_BASE)};
 
+std::uint32_t dest_offset_id = 0; // Flip between 0 and 1 to keep dest pointer between kernel calls
 #endif
 
 std::uint32_t cfg_state_id   = 0; // Flip between 0 and 1 to keep state between kernel calls
-std::uint32_t dest_offset_id = 0; // Flip between 0 and 1 to keep dest pointer between kernel calls
 } // namespace ckernel
+
+namespace ckernel::trisc
+{
+#ifdef ARCH_QUASAR
+thread_local std::uint32_t dest_register_offset = 0; // Keep track of dest register offset between kernel calls, values = {0, 256, 512}
+#endif
+} // namespace ckernel::trisc

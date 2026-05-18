@@ -15,6 +15,7 @@
 extern volatile char __ldm_bss_start[], __ldm_bss_end[];
 extern volatile char __loader_init_start[], __loader_init_end[];
 extern volatile char __ldm_data_start[], __ldm_data_end[];
+extern volatile char __tdata_start[];
 extern const std::uint32_t __stack_top[];
 extern void (*__init_array_start[])(void);
 extern void (*__init_array_end[])(void);
@@ -34,6 +35,12 @@ __attribute__((no_profile_instrument_function)) TT_ALWAYS_INLINE void do_crt0()
 
     // Set stack pointer
     asm volatile("la sp, %0" : : "i"(__stack_top) : "memory");
+
+    // Set thread pointer to the start of the TLS image so RISC-V tprel-relative
+    // accesses to thread_local variables (e.g. ckernel::trisc::dest_register_offset
+    // on Quasar) resolve to their real addresses. Each TRISC ELF has its own LDM,
+    // so `tp` is just a per-ELF base, not a per-thread one.
+    asm volatile("la tp, %0" : : "i"(__tdata_start) : "memory");
 
     // Initialize .bss
     for (volatile std::uint32_t* p = (volatile std::uint32_t*)__ldm_bss_start; p < (volatile std::uint32_t*)__ldm_bss_end; p++)
