@@ -43,7 +43,7 @@
 - name: Llama 3.1-8B seqlen sweep (N150/P150)
   cmd: |
     export HF_MODEL=meta-llama/Llama-3.1-8B-Instruct TT_CACHE_PATH=/mnt/MLPerf/huggingface/tt_cache/meta-llama/Llama-3.1-8B-Instruct
-    pytest --timeout 3600 models/tt_transformers/demo/simple_text_demo.py -k "performance-seqlen-sweep-32k"
+    pytest --timeout 3600 models/tt_transformers/demo/simple_text_demo.py -k "performance-seqlen-sweep-8k"
   model: llama3.1-8b
   skus:
     wh_n150:
@@ -135,7 +135,7 @@
 - name: Mistral-7B seqlen sweep
   cmd: |
     export HF_MODEL=mistralai/Mistral-7B-Instruct-v0.3 TT_CACHE_PATH=/mnt/MLPerf/huggingface/tt_cache/mistralai/Mistral-7B-Instruct-v0.3
-    pytest --timeout 3600 models/tt_transformers/demo/simple_text_demo.py -k "performance-seqlen-sweep-32k"
+    pytest --timeout 3600 models/tt_transformers/demo/simple_text_demo.py -k "performance-seqlen-sweep-8k"
   model: mistral-7b
   skus:
     wh_n150:
