@@ -855,10 +855,11 @@ SDPAProgramFactory::cached_program_t SDPAProgramFactory::create(
     std::vector<std::vector<HeadSegmentRef>> head_segments;
     uint32_t mcast_chains = 0;
 
-    // Under global_q_scheduling, hierarchical chain forwarding does not apply (cores are not assigned
-    // contiguous (batch, head) ranges). Skip chain construction so every core's chain.participates
-    // remains false; the reader kernel's chain-forwarding branches are then bypassed at runtime.
-    if (!is_causal && !is_chunked && !global_q_scheduling) {
+    // KV chain forwarding applies to non-causal, non-chunked workloads. Under global_q_scheduling
+    // each core's linear range is decomposed into (nb, nq, q_chunk_range) segments below — chain
+    // construction is otherwise identical to the hierarchical path. Causal+global_q (zigzag) is
+    // not eligible regardless: is_causal disables chains by definition.
+    if (!is_causal && !is_chunked) {
         head_segments.resize(total_heads);
 
         log_debug(tt::LogOp, "=== Building KV chain forwarding topology ===");
@@ -870,42 +871,76 @@ SDPAProgramFactory::cached_program_t SDPAProgramFactory::create(
         for (uint32_t i = 0; i < num_cores; ++i) {
             CoreCoord core = {i % grid_size.x, i / grid_size.x};
 
-            uint32_t local_batch_start = (i / (nh_parallel_factor * q_parallel_factor)) * batch_per_core;
-            uint32_t local_batch_end = local_batch_start + batch_per_core;
-            uint32_t local_nh_start = ((i / q_parallel_factor) % nh_parallel_factor) * nh_per_core;
-            uint32_t local_nh_end = local_nh_start + nh_per_core;
-            uint32_t local_q_start = (i % q_parallel_factor) * q_per_core;
-            uint32_t local_q_end = local_q_start + q_per_core;
-
-            // Clamp to max values
-            local_batch_start = std::min(local_batch_start, B);
-            local_batch_end = std::min(local_batch_end, B);
-            local_nh_start = std::min(local_nh_start, NQH);
-            local_nh_end = std::min(local_nh_end, NQH);
-            local_q_start = std::min(local_q_start, q_num_chunks);
-            local_q_end = std::min(local_q_end, q_num_chunks);
-
             auto& work = core_work[i];
             work.logical_core = core;
             work.physical_core = device->worker_core_from_logical_core(core);
 
-            // Track each (batch, head, q_chunk_range) this core handles
-            for (uint32_t b = local_batch_start; b < local_batch_end; ++b) {
-                for (uint32_t h = local_nh_start; h < local_nh_end; ++h) {
-                    uint32_t q_count = local_q_end - local_q_start;
-                    if (q_count > 0) {
-                        work.head_work.push_back(CoreHeadWork{
-                            .batch = b,
-                            .head = h,
-                            .q_chunk_start = local_q_start,
-                            .q_chunk_count = q_count,
-                        });
+            auto push_head_work = [&](uint32_t nb, uint32_t nh, uint32_t q_start, uint32_t q_count) {
+                if (q_count == 0) {
+                    return;
+                }
+                work.head_work.push_back(CoreHeadWork{
+                    .batch = nb,
+                    .head = nh,
+                    .q_chunk_start = q_start,
+                    .q_chunk_count = q_count,
+                });
+                const uint32_t head_id = (nb * NQH) + nh;
+                if (head_id < head_segments.size()) {
+                    head_segments[head_id].push_back(HeadSegmentRef{
+                        .core_idx = i, .head_work_index = static_cast<uint32_t>(work.head_work.size() - 1)});
+                }
+            };
 
-                        uint32_t head_id = (b * NQH) + h;
-                        if (head_id < head_segments.size()) {
-                            head_segments[head_id].push_back(HeadSegmentRef{
-                                .core_idx = i, .head_work_index = static_cast<uint32_t>(work.head_work.size() - 1)});
-                        }
+            if (global_q_scheduling) {
+                // Walk the core's [g_start, g_start + g_count) linear range and split into
+                // contiguous (nb, nq, q_chunk_range) segments. Non-causal here (chain section is
+                // !is_causal), so global_q_zigzag is off and the decompose is identity.
+                uint32_t g_start = i * global_q_base_chunks_per_core +
+                                   std::min(i, global_q_cores_doing_extra) * global_q_extra_chunks_per_core;
+                uint32_t g_count = global_q_base_chunks_per_core +
+                                   ((i < global_q_cores_doing_extra) ? global_q_extra_chunks_per_core : 0u);
+                if (g_start >= total_q_chunks) {
+                    g_start = total_q_chunks;
+                    g_count = 0;
+                } else if (g_start + g_count > total_q_chunks) {
+                    g_count = total_q_chunks - g_start;
+                }
+                work.global_q_start = g_start;
+                work.global_q_count = g_count;
+
+                uint32_t cursor = g_start;
+                const uint32_t g_end = g_start + g_count;
+                while (cursor < g_end) {
+                    const uint32_t nb = cursor / (NQH * q_num_chunks);
+                    const uint32_t nq = (cursor / q_num_chunks) % NQH;
+                    const uint32_t q_in_head = cursor % q_num_chunks;
+                    const uint32_t remaining_in_head = q_num_chunks - q_in_head;
+                    const uint32_t remaining_in_range = g_end - cursor;
+                    const uint32_t span = std::min(remaining_in_head, remaining_in_range);
+                    push_head_work(nb, nq, q_in_head, span);
+                    cursor += span;
+                }
+            } else {
+                uint32_t local_batch_start = (i / (nh_parallel_factor * q_parallel_factor)) * batch_per_core;
+                uint32_t local_batch_end = local_batch_start + batch_per_core;
+                uint32_t local_nh_start = ((i / q_parallel_factor) % nh_parallel_factor) * nh_per_core;
+                uint32_t local_nh_end = local_nh_start + nh_per_core;
+                uint32_t local_q_start = (i % q_parallel_factor) * q_per_core;
+                uint32_t local_q_end = local_q_start + q_per_core;
+
+                // Clamp to max values
+                local_batch_start = std::min(local_batch_start, B);
+                local_batch_end = std::min(local_batch_end, B);
+                local_nh_start = std::min(local_nh_start, NQH);
+                local_nh_end = std::min(local_nh_end, NQH);
+                local_q_start = std::min(local_q_start, q_num_chunks);
+                local_q_end = std::min(local_q_end, q_num_chunks);
+
+                // Track each (batch, head, q_chunk_range) this core handles
+                for (uint32_t b = local_batch_start; b < local_batch_end; ++b) {
+                    for (uint32_t h = local_nh_start; h < local_nh_end; ++h) {
+                        push_head_work(b, h, local_q_start, local_q_end - local_q_start);
                     }
                 }
             }

@@ -618,15 +618,17 @@ void kernel_main() {
 
         if constexpr (global_q_scheduling) {
             // Global Q scheduling: iterate over a linear range of B*NQH*q_num_chunks chunks.
-            // Restrictions enforced on host: !is_chunked, !use_attention_sink. Chain forwarding is
-            // disabled (host sets is_chain_participant=0 on every core).
-            uint32_t prev_nb_global_q = static_cast<uint32_t>(-1);
+            // Restrictions enforced on host: !is_chunked, !use_attention_sink. Chain forwarding
+            // works under non-causal global_q: per-(nb, nq) q_iter (reset on head transition) is
+            // what should_forward / should_receive's `q_iter < next_core_q_chunks` gate expects.
+            uint32_t prev_nb = static_cast<uint32_t>(-1);
+            uint32_t prev_nq = static_cast<uint32_t>(-1);
+            uint32_t per_head_q_iter = 0;
             uint32_t mask_batch_offset = 0;
             for (uint32_t global_q_iter = 0; global_q_iter < global_q_count; ++global_q_iter) {
                 const auto decoded =
                     decompose_global_q_index(global_q_start + global_q_iter, q_num_chunks, NQH, global_q_use_zigzag);
-                if (decoded.nb != prev_nb_global_q) {
-                    prev_nb_global_q = decoded.nb;
+                if (decoded.nb != prev_nb) {
                     if constexpr (!broadcast_provided_mask_batch) {
                         if constexpr (broadcast_provided_mask_heads) {
                             mask_batch_offset = decoded.nb * valid_Sqt * valid_Skt;
@@ -635,7 +637,13 @@ void kernel_main() {
                         }
                     }
                 }
-                read_one_chunk(decoded.nb, decoded.nq, decoded.q_chunk, global_q_iter, mask_batch_offset);
+                if (decoded.nb != prev_nb || decoded.nq != prev_nq) {
+                    per_head_q_iter = 0;
+                    prev_nb = decoded.nb;
+                    prev_nq = decoded.nq;
+                }
+                read_one_chunk(decoded.nb, decoded.nq, decoded.q_chunk, per_head_q_iter, mask_batch_offset);
+                ++per_head_q_iter;
             }
         } else {
             for (uint32_t nb = local_batch_start; nb < local_batch_end; ++nb) {
