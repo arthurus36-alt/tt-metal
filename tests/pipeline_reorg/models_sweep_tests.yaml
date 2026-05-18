@@ -40,18 +40,30 @@
 
 # ── Tier-1 seqlen sweeps ────────────────────────────────────────────────────────
 
-- name: Llama 3.1-8B seqlen sweep
+- name: Llama 3.1-8B seqlen sweep (N150/P150)
+  cmd: |
+    export HF_MODEL=meta-llama/Llama-3.1-8B-Instruct TT_CACHE_PATH=/mnt/MLPerf/huggingface/tt_cache/meta-llama/Llama-3.1-8B-Instruct
+    pytest --timeout 3600 models/tt_transformers/demo/simple_text_demo.py -k "performance-seqlen-sweep-32k"
+  model: llama3.1-8b
+  skus:
+    wh_n150:
+      timeout: 60
+      tier: 1
+    bh_p150:
+      timeout: 60
+      tier: 1
+  owner_id: U03PUAKE719 # Miguel Tairum Cruz
+  team: models
+
+- name: Llama 3.1-8B seqlen sweep (LoudBox)
   cmd: |
     export HF_MODEL=meta-llama/Llama-3.1-8B-Instruct TT_CACHE_PATH=/mnt/MLPerf/huggingface/tt_cache/meta-llama/Llama-3.1-8B-Instruct
     pytest --timeout 7200 models/tt_transformers/demo/simple_text_demo.py -k "performance-seqlen-sweep"
   model: llama3.1-8b
   skus:
-    wh_n150:
+    wh_llmbox_perf:
       timeout: 120
-      tier: 1
-    bh_p150:
-      timeout: 120
-      tier: 1
+      tier: 2
   owner_id: U03PUAKE719 # Miguel Tairum Cruz
   team: models
 
@@ -123,11 +135,11 @@
 - name: Mistral-7B seqlen sweep
   cmd: |
     export HF_MODEL=mistralai/Mistral-7B-Instruct-v0.3 TT_CACHE_PATH=/mnt/MLPerf/huggingface/tt_cache/mistralai/Mistral-7B-Instruct-v0.3
-    pytest --timeout 7200 models/tt_transformers/demo/simple_text_demo.py -k "performance-seqlen-sweep"
+    pytest --timeout 3600 models/tt_transformers/demo/simple_text_demo.py -k "performance-seqlen-sweep-32k"
   model: mistral-7b
   skus:
     wh_n150:
-      timeout: 120
+      timeout: 60
       tier: 2
   owner_id: U03PUAKE719 # Miguel Tairum Cruz
   team: models
