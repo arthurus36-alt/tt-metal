@@ -278,121 +278,18 @@ ALWI void reduce(
         else { return 0; }
     }());
 
-    // =========================================================================
-    // SFPU path (Int32/Float32 MAX). MIN is dispatched via reduce_sfpu_{h,w}_neg.cpp.
-    // =========================================================================
-    if constexpr (detail::is_sfpu_reduce_format(sfpu_format)) {
-        static_assert(
-            reduce_type == PoolType::MAX,
-            "SFPU reduce path: MAX only (MIN dispatches to reduce_sfpu_{h,w}_neg.cpp).");
+    // SFPU reduce path: MAX only (MIN dispatches to reduce_sfpu_{h,w}_neg.cpp),
+    // REDUCE_ROW / REDUCE_COL only, WaitAndPopPerTile, no accumulation.
+    constexpr bool is_sfpu = detail::is_sfpu_reduce_format(sfpu_format);
+    if constexpr (is_sfpu) {
+        static_assert(reduce_type == PoolType::MAX, "SFPU reduce path: MAX only");
         static_assert(
             reduce_dim == ReduceDim::REDUCE_ROW || reduce_dim == ReduceDim::REDUCE_COL,
-            "SFPU reduce path: REDUCE_ROW or REDUCE_COL only (full HW reduce uses two host passes).");
+            "SFPU reduce path: REDUCE_ROW or REDUCE_COL only");
         static_assert(
             input_policy == ReduceInputPolicy::WaitAndPopPerTile,
-            "SFPU reduce path: only WaitAndPopPerTile is supported.");
-        static_assert(!enable_accumulation, "SFPU reduce path: accumulation is not supported.");
-
-        if constexpr (reconfig_input(reconfig_mode)) {
-            reconfig_data_format(input_cb_id, scaler_cb_id);
-        }
-        if constexpr (reconfig_output(reconfig_mode)) {
-            pack_reconfig_data_format(output_cb_id);
-        }
-
-        init_sfpu(input_cb_id, output_cb_id);
-        copy_tile_to_dst_init_short(input_cb_id);
-
-        constexpr uint32_t onetile = 1;
-        scaler_cb.wait_front(onetile);
-        PACK((llk_pack_reduce_mask_config<reduce_dim>()));
-
-        if constexpr (reduce_dim == ReduceDim::REDUCE_COL) {
-            // H-reduce. Chunk Wt outputs across DEST. SFPU needs one extra DST register beyond
-            // the per-column accumulators for the binary_max_tile work tile, so chunk_size is
-            // DEST_AUTO_LIMIT - 1 (FPU folds in place and uses the full DEST_AUTO_LIMIT).
-            constexpr uint32_t chunk_size = DEST_AUTO_LIMIT - 1;
-            constexpr uint32_t col_work_dst = chunk_size;
-
-            for (uint32_t nc = 0; nc < num_batches; ++nc) {
-                for (uint32_t wt_base = 0; wt_base < Wt; wt_base += chunk_size) {
-                    const uint32_t chunk_end = (wt_base + chunk_size < Wt) ? (wt_base + chunk_size) : Wt;
-                    const uint32_t current_chunk = chunk_end - wt_base;
-
-                    tile_regs_acquire();
-                    if (Ht > 1) {
-                        detail::sfpu_reduce_max_fold_init<sfpu_format>();
-                    }
-
-                    for (uint32_t ht = 0; ht < Ht; ++ht) {
-                        for (uint32_t k = 0; k < current_chunk; ++k) {
-                            input_cb.wait_front(onetile);
-                            if (ht == 0) {
-                                copy_tile(input_cb_id, 0, k);
-                            } else {
-                                copy_tile(input_cb_id, 0, col_work_dst);
-                                detail::sfpu_reduce_max_fold_tile<sfpu_format>(k, col_work_dst, k);
-                            }
-                            input_cb.pop_front(onetile);
-                        }
-                    }
-
-                    sfpu_reduce_init<reduce_type, sfpu_format>();
-                    for (uint32_t k = 0; k < current_chunk; ++k) {
-                        sfpu_reduce<reduce_type, sfpu_format, reduce_dim>(k, /*ct_dim=*/1, /*rt_dim=*/1);
-                    }
-                    for (uint32_t k = 0; k < current_chunk; ++k) {
-                        post_reduce_op(k);
-                    }
-
-                    tile_regs_commit();
-                    tile_regs_wait();
-                    for (uint32_t k = 0; k < current_chunk; ++k) {
-                        output_cb.reserve_back(onetile);
-                        pack_tile(k, output_cb_id);
-                        output_cb.push_back(onetile);
-                    }
-                    tile_regs_release();
-                }
-            }
-        } else {  // REDUCE_ROW: W-reduce, one output per (batch, ht) row.
-            constexpr uint32_t dst_idx = 0;
-            constexpr uint32_t next_dst_idx = 1;
-
-            for (uint32_t nc = 0; nc < num_batches; ++nc) {
-                for (uint32_t ht = 0; ht < Ht; ++ht) {
-                    tile_regs_acquire();
-                    if (Wt > 1) {
-                        detail::sfpu_reduce_max_fold_init<sfpu_format>();
-                    }
-
-                    input_cb.wait_front(onetile);
-                    copy_tile(input_cb_id, 0, dst_idx);
-                    input_cb.pop_front(onetile);
-
-                    for (uint32_t wt = 1; wt < Wt; ++wt) {
-                        input_cb.wait_front(onetile);
-                        copy_tile(input_cb_id, 0, next_dst_idx);
-                        detail::sfpu_reduce_max_fold_tile<sfpu_format>(dst_idx, next_dst_idx, dst_idx);
-                        input_cb.pop_front(onetile);
-                    }
-
-                    sfpu_reduce_init<reduce_type, sfpu_format>();
-                    sfpu_reduce<reduce_type, sfpu_format, reduce_dim>(dst_idx, /*ct_dim=*/1, /*rt_dim=*/1);
-                    post_reduce_op(dst_idx);
-
-                    tile_regs_commit();
-                    output_cb.reserve_back(onetile);
-                    tile_regs_wait();
-                    pack_tile(dst_idx, output_cb_id);
-                    tile_regs_release();
-                    output_cb.push_back(onetile);
-                }
-            }
-        }
-
-        PACK((llk_pack_reduce_mask_clear()));
-        return;
+            "SFPU reduce path: WaitAndPopPerTile only");
+        static_assert(!enable_accumulation, "SFPU reduce path: accumulation not supported");
     }
 
     // Apply reconfig based on mode
@@ -407,12 +304,18 @@ ALWI void reduce(
         pack_reconfig_data_format(output_cb_id);
     }
     // Initialization
-    if constexpr (use_matmul) {
+    if constexpr (is_sfpu) {
+        init_sfpu(input_cb_id, output_cb_id);
+        copy_tile_to_dst_init_short(input_cb_id);
+    } else if constexpr (use_matmul) {
         reduce_with_matmul_init(input_cb_id, scaler_cb_id);
     } else {
         reduce_init<reduce_type, reduce_dim>(input_cb_id, scaler_cb_id, output_cb_id);
     }
     scaler_cb.wait_front(1);  // Wait for scaler tile
+    if constexpr (is_sfpu) {
+        PACK((llk_pack_reduce_mask_config<reduce_dim>()));
+    }
 
     constexpr uint32_t onetile = 1;
 
@@ -533,13 +436,31 @@ ALWI void reduce(
 
                 tile_regs_acquire();
 
-                // Reload accumulator if needed (zero overhead when AccumulateT is NoAccumulation)
-                reload_accumulator_if_needed<reduce_type, reduce_dim, AccumulateT, use_matmul>(
-                    accum_cb, input_cb_id, scaler_cb_id, accumulate);
+                if constexpr (is_sfpu) {
+                    // SFPU replay state is tied to the DST window; init per acquire.
+                    if (Wt > 1) {
+                        detail::sfpu_reduce_max_fold_init<sfpu_format>();
+                    }
+                } else {
+                    // Reload accumulator if needed (zero overhead when AccumulateT is NoAccumulation)
+                    reload_accumulator_if_needed<reduce_type, reduce_dim, AccumulateT, use_matmul>(
+                        accum_cb, input_cb_id, scaler_cb_id, accumulate);
+                }
 
                 const uint32_t dst_idx = get_dst_index(accumulate);
                 for (uint32_t wt = 0; wt < Wt; ++wt) {
-                    if constexpr (waits_per_tile(input_policy)) {
+                    if constexpr (is_sfpu) {
+                        constexpr uint32_t sfpu_work_dst = 1;
+                        input_cb.wait_front(onetile);
+                        if (wt == 0) {
+                            copy_tile(input_cb_id, 0, dst_idx);
+                        } else {
+                            copy_tile(input_cb_id, 0, sfpu_work_dst);
+                            detail::sfpu_reduce_max_fold_tile<sfpu_format>(
+                                dst_idx, sfpu_work_dst, dst_idx);
+                        }
+                        input_cb.pop_front(onetile);
+                    } else if constexpr (waits_per_tile(input_policy)) {
                         // One-at-a-time: wait/pop per tile
                         input_cb.wait_front(onetile);
                         if constexpr (use_matmul) {
@@ -564,6 +485,12 @@ ALWI void reduce(
                                 input_cb_id, scaler_cb_id, wt + index_offset, 0, dst_idx);
                         }
                     }
+                }
+
+                // SFPU intra-tile finalize
+                if constexpr (is_sfpu) {
+                    sfpu_reduce_init<reduce_type, sfpu_format>();
+                    sfpu_reduce<reduce_type, sfpu_format, reduce_dim>(dst_idx, /*ct_dim=*/1, /*rt_dim=*/1);
                 }
 
                 // Call post-reduce operation (e.g., recip_tile for softmax)
@@ -608,7 +535,7 @@ ALWI void reduce(
 
         // Auto-detect chunk size from DEST register capacity
         // Both reader (dataflow) and compute kernels compute this identically via DEST_AUTO_LIMIT
-        constexpr uint32_t chunk_size = DEST_AUTO_LIMIT;
+        constexpr uint32_t chunk_size = is_sfpu ? (DEST_AUTO_LIMIT - 1) : DEST_AUTO_LIMIT;
         const uint32_t stride = (input_memory_layout.row_stride > 0) ? input_memory_layout.row_stride : Wt;
         const uint32_t tiles_per_bulk = Ht * stride;
         const uint32_t total_output_tiles = Wt * num_batches;
@@ -640,15 +567,33 @@ ALWI void reduce(
 
                 tile_regs_acquire();
 
-                // Reload accumulator if needed (zero overhead when AccumulateT is NoAccumulation)
-                reload_accumulator_if_needed<reduce_type, reduce_dim, AccumulateT>(
-                    accum_cb, input_cb_id, scaler_cb_id, accumulate);
+                if constexpr (is_sfpu) {
+                    // SFPU replay state is tied to the DST window; init per acquire.
+                    if (Ht > 1) {
+                        detail::sfpu_reduce_max_fold_init<sfpu_format>();
+                    }
+                } else {
+                    // Reload accumulator if needed (zero overhead when AccumulateT is NoAccumulation)
+                    reload_accumulator_if_needed<reduce_type, reduce_dim, AccumulateT>(
+                        accum_cb, input_cb_id, scaler_cb_id, accumulate);
+                }
 
                 for (uint32_t ht = 0; ht < Ht; ++ht) {
                     // Base dst_index: from accumulation config or 0 for multi-column output
                     uint32_t dst_idx = get_dst_index(accumulate);
                     for (uint32_t i = wt; i < chunk_end; ++i) {
-                        if constexpr (waits_per_tile(input_policy)) {
+                        if constexpr (is_sfpu) {
+                            constexpr uint32_t sfpu_work_dst = chunk_size;
+                            input_cb.wait_front(onetile);
+                            if (ht == 0) {
+                                copy_tile(input_cb_id, 0, dst_idx);
+                            } else {
+                                copy_tile(input_cb_id, 0, sfpu_work_dst);
+                                detail::sfpu_reduce_max_fold_tile<sfpu_format>(
+                                    dst_idx, sfpu_work_dst, dst_idx);
+                            }
+                            input_cb.pop_front(onetile);
+                        } else if constexpr (waits_per_tile(input_policy)) {
                             // One-at-a-time: wait/pop per tile
                             input_cb.wait_front(onetile);
                             reduce_tile<reduce_type, reduce_dim>(
@@ -665,6 +610,16 @@ ALWI void reduce(
                                 input_cb_id, scaler_cb_id, tile_idx, 0, dst_idx);
                         }
                         ++dst_idx;
+                    }
+                }
+
+                // SFPU intra-tile finalize per output slot
+                if constexpr (is_sfpu) {
+                    const uint32_t sfpu_base_dst = get_dst_index(accumulate);
+                    sfpu_reduce_init<reduce_type, sfpu_format>();
+                    for (uint32_t k = 0; k < current_chunk; ++k) {
+                        sfpu_reduce<reduce_type, sfpu_format, reduce_dim>(
+                            sfpu_base_dst + k, /*ct_dim=*/1, /*rt_dim=*/1);
                     }
                 }
 
@@ -706,7 +661,9 @@ ALWI void reduce(
     }
 
     // Cleanup
-    if constexpr (!use_matmul) {
+    if constexpr (is_sfpu) {
+        PACK((llk_pack_reduce_mask_clear()));
+    } else if constexpr (!use_matmul) {
         reduce_uninit<>();
     }
 }
