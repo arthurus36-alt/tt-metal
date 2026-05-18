@@ -373,17 +373,6 @@ ALWI void fast_untilize_block(
             if constexpr (full_ct_dim <= FAST_UNTILIZE_MAX_UNIT_DIM) {
                 llk_pack_fast_untilize_block_at_address<FAST_UNTILIZE_MAX_UNIT_DIM, DST_SYNC_MODE>(
                     chunk_address, unit_dim, prev_pack_unit_dim);
-            } else if constexpr (_llk_pack_fast_untilize_reuse_strided_dest_<
-                                     FAST_UNTILIZE_MAX_UNIT_DIM,
-                                     full_ct_dim>()) {
-                if (tiles_done == 0) {
-                    llk_pack_fast_untilize_strided_row_begin_at_address(chunk_address);
-                }
-                llk_pack_fast_untilize_block_strided_current<FAST_UNTILIZE_MAX_UNIT_DIM, full_ct_dim, DST_SYNC_MODE>(
-                    unit_dim, prev_pack_unit_dim);
-                if (tiles_done + unit_dim < full_ct_dim) {
-                    llk_pack_fast_untilize_advance_strided_row_address();
-                }
             } else {
                 llk_pack_fast_untilize_block_strided_at_address<FAST_UNTILIZE_MAX_UNIT_DIM, full_ct_dim, DST_SYNC_MODE>(
                     chunk_address, unit_dim, prev_pack_unit_dim);
