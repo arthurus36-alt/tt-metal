@@ -58,14 +58,13 @@ void kernel_main() {
         write_offset_phase_2 = get_arg_val<uint32_t>(13);
     }
 
-    // Global Q scheduling args at slots 12..13. num_phases==1 is pinned by the SDPA program
-    // factory, so they don't collide with phase_2 offsets (slots 12..13 on the num_phases==2
-    // path used by ring_distributed, which doesn't set global_q_scheduling).
+    // Global Q scheduling args at slots 14..15 — past the max phase_2 slot (13), so no
+    // collision with the num_phases==2 path used by ring_distributed.
     uint32_t global_q_start = 0;
     uint32_t global_q_count = 0;
     if constexpr (global_q_scheduling) {
-        global_q_start = get_arg_val<uint32_t>(12);
-        global_q_count = get_arg_val<uint32_t>(13);
+        global_q_start = get_arg_val<uint32_t>(14);
+        global_q_count = get_arg_val<uint32_t>(15);
     }
 
     const uint32_t q_chunks_per_core = local_q_end - local_q_start;

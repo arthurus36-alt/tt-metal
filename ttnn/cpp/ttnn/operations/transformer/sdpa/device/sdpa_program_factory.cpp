@@ -804,6 +804,12 @@ SDPAProgramFactory::cached_program_t SDPAProgramFactory::create(
     uint32_t read_offset = 0;
     uint32_t write_offset = 0;
 
+    // Defense-in-depth: kernels place global_q runtime args past the max phase_2 slot,
+    // but the host-side compute/writer arg packing only zeros the phase_2 slots when
+    // num_phases==1. Any future change that raises num_phases on this path must rethink
+    // the layout — assert early so the failure is loud rather than a slot reinterpretation.
+    TT_FATAL(num_phases == 1, "Single-chip SDPA assumes num_phases == 1 under global Q scheduling");
+
     // Build chain topology for KV forwarding (non-causal only)
     std::vector<CoreWork> core_work(num_cores);
     std::vector<CoreChainInfo> core_chain_info(num_cores);
@@ -1378,33 +1384,36 @@ SDPAProgramFactory::cached_program_t SDPAProgramFactory::create(
         std::vector<uint32_t> writer_args = {
             out_addr,
             i,
-            0u,  // local_batch_start (unused under global)
-            0u,  // local_batch_end
-            0u,  // local_nh_start
-            0u,  // local_nh_end
-            0u,  // local_q_start
-            0u,  // local_q_end
-            num_phases,
-            static_cast<uint32_t>(flexible_chunked ? 1 : 0),
-            chunked_q_chunk_offset,
-            write_offset,  // write_offset
-            global_q_start,
-            global_q_count,
+            0u,                                               // 2:  local_batch_start (unused under global)
+            0u,                                               // 3:  local_batch_end
+            0u,                                               // 4:  local_nh_start
+            0u,                                               // 5:  local_nh_end
+            0u,                                               // 6:  local_q_start
+            0u,                                               // 7:  local_q_end
+            num_phases,                                       // 8
+            static_cast<uint32_t>(flexible_chunked ? 1 : 0),  // 9
+            chunked_q_chunk_offset,                           // 10: phase_1
+            write_offset,                                     // 11
+            0u,                                               // 12: phase_2 chunk_start (unused, num_phases==1)
+            0u,                                               // 13: phase_2 write_offset (unused, num_phases==1)
+            global_q_start,                                   // 14
+            global_q_count,                                   // 15
         };
         SetRuntimeArgs(program, writer_kernels_id, core, writer_args);
         std::vector<uint32_t> compute_args = {
             i,
-            0u,  // local_batch_start (unused under global)
-            0u,  // local_batch_end
-            0u,  // local_nh_start
-            0u,  // local_nh_end
-            0u,  // local_q_start
-            0u,  // local_q_end
-            num_phases,
-            static_cast<uint32_t>(flexible_chunked ? 1 : 0),
-            chunked_q_chunk_offset,
-            global_q_start,
-            global_q_count,
+            0u,                                               // 1: local_batch_start (unused under global)
+            0u,                                               // 2: local_batch_end
+            0u,                                               // 3: local_nh_start
+            0u,                                               // 4: local_nh_end
+            0u,                                               // 5: local_q_start
+            0u,                                               // 6: local_q_end
+            num_phases,                                       // 7
+            static_cast<uint32_t>(flexible_chunked ? 1 : 0),  // 8
+            chunked_q_chunk_offset,                           // 9:  phase_1
+            0u,                                               // 10: phase_2 chunked offset (unused, num_phases==1)
+            global_q_start,                                   // 11
+            global_q_count,                                   // 12
         };
         SetRuntimeArgs(program, compute_kernels_id, core, compute_args);
     }
