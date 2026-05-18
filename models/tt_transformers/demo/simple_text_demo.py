@@ -785,6 +785,32 @@ _trace_region_size = (
             None,  # num_layers, if None -> defaults to all layers
             "full",  # performs both prefill and decode
         ),
+        (  # seqlen-sweep-8k [CI-only] - single-chip variant (N150/P150): sweeps 1k→8k
+            # max_seq_len=8k avoids the L1 CB clash that occurs at 32k on single-chip WH
+            # Phase 1: run to completion without crashing; no output validation
+            (  # input_prompts: one file per seqlen step, powers of two from 1k to 8k
+                "models/tt_transformers/demo/sample_prompts/input_data_long_1k.json",
+                "models/tt_transformers/demo/sample_prompts/input_data_long_2k.json",
+                "models/tt_transformers/demo/sample_prompts/input_data_long_4k.json",
+                "models/tt_transformers/demo/sample_prompts/input_data_long_8k.json",
+            ),
+            True,  # instruct mode
+            4,  # repeat_batches: one per seqlen step (1k, 2k, 4k, 8k)
+            8 * 1024,  # max_seq_len: fits L1 CB constraints on single N150 chip
+            1,  # batch_size
+            1,  # max_generated_tokens: Phase 1 — no output validation
+            True,  # paged_attention
+            {"page_block_size": 32, "page_max_num_blocks_per_dp": 1024},  # page_params: fits on single N150 chip
+            {"temperature": 0, "top_p": 0.08, "top_k": 32},  # sampling_params (argmax)
+            False,  # stop_at_eos
+            True,  # ci_only
+            1,  # data_parallel
+            False,  # token_accuracy
+            False,  # stress_test
+            True,  # enable_trace
+            None,  # num_layers, if None -> defaults to all layers
+            "full",  # mode
+        ),
         (  # seqlen-sweep-32k [CI-only] - single-chip variant (N150/P150): sweeps 1k→32k
             # Uses page_params that fit within N150 DRAM (32k KV cache, 1 chip)
             # Phase 1: run to completion without crashing; no output validation
@@ -885,6 +911,7 @@ _trace_region_size = (
         "ci-eval-1",  # CI 6 repeat batches with output comparison
         "ci-eval-32",  # CI batch 32 with 3 repeat batches and output comparison
         "ci-long-context-16k",  # 16k context, max_seq_len=32k, used for testing --max_seq_len=16k override
+        "seqlen-sweep-8k",  # single-chip (N150/P150): sweeps 1k→8k, Phase 1: no output validation
         "seqlen-sweep-32k",  # single-chip (N150/P150): sweeps 1k→32k, Phase 1: no output validation
         "seqlen-sweep",  # multi-chip (T3K/LoudBox/Galaxy): sweeps 1k→128k, Phase 1: no output validation
         "device-perf",  # Device perf
