@@ -41,10 +41,16 @@ namespace {
 // builds (which merge anonymous namespaces from different .cpp files into one
 // TU). DFB ids and the DefinesFromMap helper are shared
 // and live in reduce_metal2_factory_helpers.hpp.
+//
+// split_work_to_cores can produce two work groups with different per-core row
+// counts; we materialize one compute KernelSpec per non-empty group so `Ht` stays
+// compile-time. Reader/writer are common to both groups.
 constexpr const char* W_READER_KERNEL = "reduce_w_reader";
 constexpr const char* W_WRITER_KERNEL = "reduce_w_writer";
-constexpr const char* W_COMPUTE_KERNEL = "reduce_w_compute";
-constexpr const char* W_WORK_UNIT = "all_workers";
+constexpr const char* W_COMPUTE_KERNEL_G1 = "reduce_w_compute_g1";
+constexpr const char* W_COMPUTE_KERNEL_G2 = "reduce_w_compute_g2";
+constexpr const char* W_WORK_UNIT_G1 = "workers_g1";
+constexpr const char* W_WORK_UNIT_G2 = "workers_g2";
 constexpr const char* W_INPUT_TENSOR = "input_tensor";
 constexpr const char* W_OUTPUT_TENSOR = "output_tensor";
 
@@ -139,8 +145,8 @@ m2::ProgramRunParams BuildRunParams(
     m2::ProgramRunParams::KernelRunParams writer_params;
     writer_params.kernel_spec_name = W_WRITER_KERNEL;
 
-    m2::ProgramRunParams::KernelRunParams compute_params;
-    compute_params.kernel_spec_name = W_COMPUTE_KERNEL;
+    // Compute kernels have no per-core RTAs (Ht is a CTA on each per-group KernelSpec),
+    // so they don't appear in kernel_run_params.
 
     uint32_t num_tiles_read = 0;
     for (const auto& core : shared.cores) {
@@ -170,15 +176,11 @@ m2::ProgramRunParams BuildRunParams(
                     {"start_id", num_tiles_read / out_dim_divider},
                 },
         });
-        compute_params.named_runtime_args.push_back(m2::ProgramRunParams::KernelRunParams::NodeNamedRTAs{
-            .node = core,
-            .args = {{"Ht", num_rows_per_core}},
-        });
 
         num_tiles_read += num_tensor_tiles_per_core;
     }
 
-    params.kernel_run_params = {std::move(reader_params), std::move(writer_params), std::move(compute_params)};
+    params.kernel_run_params = {std::move(reader_params), std::move(writer_params)};
     params.tensor_args = {
         m2::ProgramRunParams::TensorArg{.tensor_parameter_name = W_INPUT_TENSOR, .tensor = std::cref(input_mt)},
         m2::ProgramRunParams::TensorArg{.tensor_parameter_name = W_OUTPUT_TENSOR, .tensor = std::cref(output_mt)},
@@ -351,100 +353,130 @@ ttnn::device_operation::ProgramArtifacts ReduceMultiCoreWProgramFactory::create_
         m2::KernelSpec::TensorBinding{.tensor_parameter_name = W_OUTPUT_TENSOR, .accessor_name = "output_tensor"},
     };
 
-    // ---- Compute kernel ----
+    // ---- Compute kernel(s) ----
+    // split_work_to_cores can produce two core groups with different per-core row counts.
+    // We materialize one compute KernelSpec per non-empty group, each with its group's
+    // per-core `Ht` bound as a CTA. The shared kernel source (reduce.cpp or
+    // reduce_w_neg.cpp) takes `Ht` as a compile-time argument, preserving compile-time
+    // loop unrolling.
     const std::string compute_kernel_path =
         operation_attributes.negate
             ? "ttnn/cpp/ttnn/operations/reduction/generic/device/kernels/compute/reduce_w_neg.cpp"
             : "ttnn/cpp/ttnn/operations/reduction/generic/device/kernels/compute/reduce.cpp";
 
-    m2::KernelSpec compute;
-    compute.unique_id = W_COMPUTE_KERNEL;
-    compute.source = m2::KernelSpec::SourceFilePath{compute_kernel_path};
-    compute.compile_time_arg_bindings = {
-        {"Wt", Wt},
-        {"NC", 1u},
-        {"post_mul_scaler_bits", post_mul_scaler_bits},
-    };
-    compute.runtime_arguments_schema.named_runtime_args = {"Ht"};
     auto compute_defines = reduce_defines;
     if (use_post_mul) {
         compute_defines.emplace_back("REDUCE_POST_MUL", "1");
     }
-    compute.compiler_options.defines = std::move(compute_defines);
-    compute.config_spec = m2::ComputeConfiguration{
-        .math_fidelity = math_fidelity,
-        .fp32_dest_acc_en = fp32_dest_acc_en,
+
+    auto make_compute_kernel = [&](const char* unique_id, uint32_t Ht) {
+        m2::KernelSpec compute;
+        compute.unique_id = unique_id;
+        compute.source = m2::KernelSpec::SourceFilePath{compute_kernel_path};
+        compute.compile_time_arg_bindings = {
+            {"Ht", Ht},
+            {"Wt", Wt},
+            {"NC", 1u},
+            {"post_mul_scaler_bits", post_mul_scaler_bits},
+        };
+        compute.compiler_options.defines = compute_defines;
+        compute.config_spec = m2::ComputeConfiguration{
+            .math_fidelity = math_fidelity,
+            .fp32_dest_acc_en = fp32_dest_acc_en,
+        };
+        compute.dfb_bindings = {
+            m2::KernelSpec::DFBBinding{
+                .dfb_spec_name = INPUT_DFB,
+                .local_accessor_name = "input",
+                .endpoint_type = m2::KernelSpec::DFBEndpointType::CONSUMER,
+                .access_pattern = m2::DFBAccessPattern::STRIDED,
+            },
+            m2::KernelSpec::DFBBinding{
+                .dfb_spec_name = SCALER_DFB,
+                .local_accessor_name = "scaler",
+                .endpoint_type = m2::KernelSpec::DFBEndpointType::CONSUMER,
+                .access_pattern = m2::DFBAccessPattern::STRIDED,
+            },
+            m2::KernelSpec::DFBBinding{
+                .dfb_spec_name = OUTPUT_DFB,
+                .local_accessor_name = "output",
+                .endpoint_type = m2::KernelSpec::DFBEndpointType::PRODUCER,
+                .access_pattern = m2::DFBAccessPattern::STRIDED,
+            },
+        };
+        if (operation_attributes.negate) {
+            // The acc and ineg DFBs are produced AND consumed by this same kernel. Metal 2.0
+            // requires distinct local_accessor_names per binding even when both endpoints are
+            // the same kernel; on Gen1 the two accessor ids resolve to the same underlying CB.
+            compute.dfb_bindings.insert(
+                compute.dfb_bindings.end(),
+                {
+                    m2::KernelSpec::DFBBinding{
+                        .dfb_spec_name = ACC_DFB,
+                        .local_accessor_name = "acc_w",
+                        .endpoint_type = m2::KernelSpec::DFBEndpointType::PRODUCER,
+                        .access_pattern = m2::DFBAccessPattern::STRIDED,
+                    },
+                    m2::KernelSpec::DFBBinding{
+                        .dfb_spec_name = ACC_DFB,
+                        .local_accessor_name = "acc_r",
+                        .endpoint_type = m2::KernelSpec::DFBEndpointType::CONSUMER,
+                        .access_pattern = m2::DFBAccessPattern::STRIDED,
+                    },
+                    m2::KernelSpec::DFBBinding{
+                        .dfb_spec_name = INEG_DFB,
+                        .local_accessor_name = "ineg_w",
+                        .endpoint_type = m2::KernelSpec::DFBEndpointType::PRODUCER,
+                        .access_pattern = m2::DFBAccessPattern::STRIDED,
+                    },
+                    m2::KernelSpec::DFBBinding{
+                        .dfb_spec_name = INEG_DFB,
+                        .local_accessor_name = "ineg_r",
+                        .endpoint_type = m2::KernelSpec::DFBEndpointType::CONSUMER,
+                        .access_pattern = m2::DFBAccessPattern::STRIDED,
+                    },
+                });
+        }
+        return compute;
     };
-    compute.dfb_bindings = {
-        m2::KernelSpec::DFBBinding{
-            .dfb_spec_name = INPUT_DFB,
-            .local_accessor_name = "input",
-            .endpoint_type = m2::KernelSpec::DFBEndpointType::CONSUMER,
-            .access_pattern = m2::DFBAccessPattern::STRIDED,
-        },
-        m2::KernelSpec::DFBBinding{
-            .dfb_spec_name = SCALER_DFB,
-            .local_accessor_name = "scaler",
-            .endpoint_type = m2::KernelSpec::DFBEndpointType::CONSUMER,
-            .access_pattern = m2::DFBAccessPattern::STRIDED,
-        },
-        m2::KernelSpec::DFBBinding{
-            .dfb_spec_name = OUTPUT_DFB,
-            .local_accessor_name = "output",
-            .endpoint_type = m2::KernelSpec::DFBEndpointType::PRODUCER,
-            .access_pattern = m2::DFBAccessPattern::STRIDED,
-        },
-    };
-    if (operation_attributes.negate) {
-        // The acc and ineg DFBs are produced AND consumed by this same kernel. Metal 2.0
-        // requires distinct local_accessor_names per binding even when both endpoints are
-        // the same kernel; on Gen1 the two accessor ids resolve to the same underlying CB.
-        compute.dfb_bindings.insert(
-            compute.dfb_bindings.end(),
-            {
-                m2::KernelSpec::DFBBinding{
-                    .dfb_spec_name = ACC_DFB,
-                    .local_accessor_name = "acc_w",
-                    .endpoint_type = m2::KernelSpec::DFBEndpointType::PRODUCER,
-                    .access_pattern = m2::DFBAccessPattern::STRIDED,
-                },
-                m2::KernelSpec::DFBBinding{
-                    .dfb_spec_name = ACC_DFB,
-                    .local_accessor_name = "acc_r",
-                    .endpoint_type = m2::KernelSpec::DFBEndpointType::CONSUMER,
-                    .access_pattern = m2::DFBAccessPattern::STRIDED,
-                },
-                m2::KernelSpec::DFBBinding{
-                    .dfb_spec_name = INEG_DFB,
-                    .local_accessor_name = "ineg_w",
-                    .endpoint_type = m2::KernelSpec::DFBEndpointType::PRODUCER,
-                    .access_pattern = m2::DFBAccessPattern::STRIDED,
-                },
-                m2::KernelSpec::DFBBinding{
-                    .dfb_spec_name = INEG_DFB,
-                    .local_accessor_name = "ineg_r",
-                    .endpoint_type = m2::KernelSpec::DFBEndpointType::CONSUMER,
-                    .access_pattern = m2::DFBAccessPattern::STRIDED,
-                },
-            });
+
+    const bool group_2_present = wd.core_group_2.num_cores() > 0;
+
+    std::vector<m2::KernelSpec> kernels;
+    kernels.push_back(std::move(reader));
+    kernels.push_back(std::move(writer));
+    kernels.push_back(make_compute_kernel(W_COMPUTE_KERNEL_G1, wd.num_rows_per_core_group_1));
+    if (group_2_present) {
+        kernels.push_back(make_compute_kernel(W_COMPUTE_KERNEL_G2, wd.num_rows_per_core_group_2));
     }
 
-    // ---- Single work unit covering all worker cores ----
-    m2::WorkUnitSpec work_unit;
-    work_unit.unique_id = W_WORK_UNIT;
-    work_unit.kernels = {W_READER_KERNEL, W_WRITER_KERNEL, W_COMPUTE_KERNEL};
-    work_unit.target_nodes = wd.all_cores;
+    // ---- Work units: one per non-empty core group ----
+    std::vector<m2::WorkUnitSpec> work_units;
+    {
+        m2::WorkUnitSpec wu;
+        wu.unique_id = W_WORK_UNIT_G1;
+        wu.kernels = {W_READER_KERNEL, W_WRITER_KERNEL, W_COMPUTE_KERNEL_G1};
+        wu.target_nodes = wd.core_group_1;
+        work_units.push_back(std::move(wu));
+    }
+    if (group_2_present) {
+        m2::WorkUnitSpec wu;
+        wu.unique_id = W_WORK_UNIT_G2;
+        wu.kernels = {W_READER_KERNEL, W_WRITER_KERNEL, W_COMPUTE_KERNEL_G2};
+        wu.target_nodes = wd.core_group_2;
+        work_units.push_back(std::move(wu));
+    }
 
     // ---- Assemble + parameterize ----
     m2::ProgramSpec spec;
     spec.program_id = "ttnn::reduce_multi_core_w";
-    spec.kernels = {std::move(reader), std::move(writer), std::move(compute)};
+    spec.kernels = std::move(kernels);
     spec.dataflow_buffers = std::move(dataflow_buffers);
     spec.tensor_parameters = {
         m2::TensorParameter{.unique_id = W_INPUT_TENSOR, .spec = a.mesh_tensor().tensor_spec()},
         m2::TensorParameter{.unique_id = W_OUTPUT_TENSOR, .spec = output.mesh_tensor().tensor_spec()},
     };
-    spec.work_units = {std::move(work_unit)};
+    spec.work_units = std::move(work_units);
 
     ReduceMultiCoreWSharedVariables shared{
         .cores = wd.cores,

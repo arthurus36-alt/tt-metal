@@ -5,10 +5,10 @@
 // Metal 2.0 compute kernel for the multi-core W reduction primitive *with negation*.
 //
 // Migration notes:
-//   - Compile-time arguments are bound by name (`args::Wt`, `args::NC`,
+//   - Compile-time arguments are bound by name (`args::Ht`, `args::Wt`, `args::NC`,
 //     `args::post_mul_scaler_bits`).
-//   - `Ht` is bound as a per-node *runtime* argument (`args::Ht`); see the comment in
-//     `reduce.cpp` for why.
+//   - `Ht` is a compile-time argument; see `reduce.cpp` for the two-KernelSpec
+//     pattern used when work-split produces groups with different per-core row counts.
 //   - Local DataflowBuffers are bound by name (`dfb::input`, `dfb::scaler`,
 //     `dfb::output`, `dfb::acc_w`/`dfb::acc_r`, `dfb::ineg_w`/`dfb::ineg_r`).
 //   - The accumulator and intermediate-negation buffers are produced AND consumed by
@@ -40,7 +40,7 @@
 #endif
 
 void kernel_main() {
-    const uint32_t Ht = get_arg(args::Ht);
+    constexpr uint32_t Ht = get_arg(args::Ht);
     constexpr uint32_t Wt = get_arg(args::Wt);
     constexpr uint32_t NC = get_arg(args::NC);
 #ifdef REDUCE_POST_MUL

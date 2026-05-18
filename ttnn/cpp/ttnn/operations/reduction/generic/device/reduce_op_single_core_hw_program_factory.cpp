@@ -60,8 +60,6 @@ struct ReduceSingleCoreHwSharedVariables {
 
 m2::ProgramRunParams BuildRunParams(
     const ReduceSingleCoreHwSharedVariables& shared,
-    bool negate,
-    uint32_t Ht,
     const tt::tt_metal::MeshTensor& input_mt,
     const tt::tt_metal::MeshTensor& output_mt) {
     m2::ProgramRunParams params;
@@ -88,19 +86,9 @@ m2::ProgramRunParams BuildRunParams(
             },
     });
 
-    m2::ProgramRunParams::KernelRunParams compute_params;
-    compute_params.kernel_spec_name = HW_COMPUTE_KERNEL;
-    if (!negate) {
-        // Non-negate kernel (reduce.cpp) takes Ht as a per-node runtime arg so a single
-        // KernelSpec can serve both the W factory (varying per-core Ht) and the HW factory
-        // (constant Ht). The negate kernel (reduce_hw_neg.cpp) takes Ht as compile-time.
-        compute_params.named_runtime_args.push_back(m2::ProgramRunParams::KernelRunParams::NodeNamedRTAs{
-            .node = shared.core,
-            .args = {{"Ht", Ht}},
-        });
-    }
-
-    params.kernel_run_params = {std::move(reader_params), std::move(writer_params), std::move(compute_params)};
+    // Compute kernel has no per-node RTAs: Ht, Wt, NC are all CTAs in both the
+    // negate and non-negate paths.
+    params.kernel_run_params = {std::move(reader_params), std::move(writer_params)};
     params.tensor_args = {
         m2::ProgramRunParams::TensorArg{.tensor_parameter_name = HW_INPUT_TENSOR, .tensor = std::cref(input_mt)},
         m2::ProgramRunParams::TensorArg{.tensor_parameter_name = HW_OUTPUT_TENSOR, .tensor = std::cref(output_mt)},
@@ -320,9 +308,9 @@ ttnn::device_operation::ProgramArtifacts ReduceSingleCoreHwProgramFactory::creat
     };
 
     // ---- Compute ----
-    // Non-negate uses the shared reduce.cpp (Ht is runtime so the same source
-    // serves both the W and HW factories). Negate uses the HW-specific reduce_hw_neg.cpp,
-    // which takes all dims as compile-time arguments.
+    // Both the negate and non-negate compute kernels take Ht, Wt, NC as compile-time
+    // arguments. The single-core HW factory has constant per-core dimensions, so all
+    // three are bound as CTAs.
     const std::string compute_kernel_path =
         operation_attributes.negate
             ? "ttnn/cpp/ttnn/operations/reduction/generic/device/kernels/compute/reduce_hw_neg.cpp"
@@ -331,21 +319,12 @@ ttnn::device_operation::ProgramArtifacts ReduceSingleCoreHwProgramFactory::creat
     m2::KernelSpec compute;
     compute.unique_id = HW_COMPUTE_KERNEL;
     compute.source = m2::KernelSpec::SourceFilePath{compute_kernel_path};
-    if (operation_attributes.negate) {
-        compute.compile_time_arg_bindings = {
-            {"Ht", Ht},
-            {"Wt", Wt},
-            {"NC", NC},
-            {"post_mul_scaler_bits", post_mul_scaler_bits},
-        };
-    } else {
-        compute.compile_time_arg_bindings = {
-            {"Wt", Wt},
-            {"NC", NC},
-            {"post_mul_scaler_bits", post_mul_scaler_bits},
-        };
-        compute.runtime_arguments_schema.named_runtime_args = {"Ht"};
-    }
+    compute.compile_time_arg_bindings = {
+        {"Ht", Ht},
+        {"Wt", Wt},
+        {"NC", NC},
+        {"post_mul_scaler_bits", post_mul_scaler_bits},
+    };
     auto compute_defines = reduce_defines;
     if (use_post_mul) {
         compute_defines.emplace_back("REDUCE_POST_MUL", "1");
@@ -429,7 +408,7 @@ ttnn::device_operation::ProgramArtifacts ReduceSingleCoreHwProgramFactory::creat
         .out_dim_divider = out_dim_divider,
     };
 
-    auto run_params = BuildRunParams(shared, operation_attributes.negate, Ht, a.mesh_tensor(), output.mesh_tensor());
+    auto run_params = BuildRunParams(shared, a.mesh_tensor(), output.mesh_tensor());
 
     return ttnn::device_operation::ProgramArtifacts{.spec = std::move(spec), .run_params = std::move(run_params)};
 }

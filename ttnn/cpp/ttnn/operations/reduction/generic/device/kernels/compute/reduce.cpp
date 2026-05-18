@@ -5,13 +5,13 @@
 // Metal 2.0 compute kernel for the multi-core reduction primitive (no negation).
 //
 // Migration notes:
-//   - Compile-time arguments are bound by name (`args::Wt`, `args::NC`,
+//   - Compile-time arguments are bound by name (`args::Ht`, `args::Wt`, `args::NC`,
 //     `args::post_mul_scaler_bits`).
-//   - `Ht` is bound as a per-node *runtime* argument (`args::Ht`) rather than a
-//     compile-time argument as in the legacy kernel. This lets a single KernelSpec
-//     cover all worker cores even when split_work_to_cores produces two work groups
-//     with different per-core row counts. The trade-off is the loss of compile-time
-//     loop unrolling for the outer `Ht` loop.
+//   - `Ht` is a compile-time argument. When `split_work_to_cores` produces two work
+//     groups with different per-core row counts, the host emits two KernelSpecs of
+//     this same source — one per group — with the per-group `Ht` value bound as a
+//     CTA, placed in two WorkUnitSpecs (one per group). This preserves compile-time
+//     loop unrolling on `Ht`.
 //   - DataflowBuffers are bound by name (`dfb::input`, `dfb::scaler`, `dfb::output`)
 //     and passed *as objects* (not raw ids) to compute_kernel_lib::reduce. The
 //     helper templates on the buffer type, so the same kernel source compiles for
@@ -28,10 +28,8 @@
 #endif
 
 void kernel_main() {
-    // Per-node runtime argument: row count assigned to this worker core.
-    const uint32_t Ht = get_arg(args::Ht);
-
-    // Compile-time arguments shared by every worker core.
+    // Compile-time arguments shared by every worker core in this KernelSpec's group.
+    constexpr uint32_t Ht = get_arg(args::Ht);
     constexpr uint32_t Wt = get_arg(args::Wt);
     constexpr uint32_t NC = get_arg(args::NC);
 
