@@ -785,6 +785,33 @@ _trace_region_size = (
             None,  # num_layers, if None -> defaults to all layers
             "full",  # performs both prefill and decode
         ),
+        (  # seqlen-sweep-n150 [CI-only] - N150/P150 variant: sweeps 8k→32k
+            # Starts at 8k because small seqlens (<8k) crash on N150 with large max_seq_len
+            # due to L1 CB clash in MLP prefill matmul (MatmulMultiCoreReuseMultiCast config).
+            # max_seq_len=64k and page_params match the validated long-context-32k config on N150.
+            # Phase 1: run to completion without crashing; no output validation
+            (  # input_prompts: one file per seqlen step, 8k to 32k
+                "models/tt_transformers/demo/sample_prompts/input_data_long_8k.json",
+                "models/tt_transformers/demo/sample_prompts/input_data_long_16k.json",
+                "models/tt_transformers/demo/sample_prompts/input_data_long_32k.json",
+            ),
+            True,  # instruct mode
+            3,  # repeat_batches: one per seqlen step (8k, 16k, 32k)
+            64 * 1024,  # max_seq_len: matches validated long-context-32k config on N150
+            1,  # batch_size
+            1,  # max_generated_tokens: Phase 1 — no output validation
+            True,  # paged_attention
+            {"page_block_size": 64, "page_max_num_blocks_per_dp": 1024},  # page_params: 64k KV slots
+            {"temperature": 0, "top_p": 0.08, "top_k": 32},  # sampling_params (argmax)
+            False,  # stop_at_eos
+            True,  # ci_only
+            1,  # data_parallel
+            False,  # token_accuracy
+            False,  # stress_test
+            True,  # enable_trace
+            None,  # num_layers, if None -> defaults to all layers
+            "full",  # mode
+        ),
         (  # seqlen-sweep-8k [CI-only] - single-chip variant (N150/P150): sweeps 1k→8k
             # max_seq_len=8k avoids the L1 CB clash that occurs at 32k on single-chip WH
             # Phase 1: run to completion without crashing; no output validation
@@ -911,6 +938,7 @@ _trace_region_size = (
         "ci-eval-1",  # CI 6 repeat batches with output comparison
         "ci-eval-32",  # CI batch 32 with 3 repeat batches and output comparison
         "ci-long-context-16k",  # 16k context, max_seq_len=32k, used for testing --max_seq_len=16k override
+        "seqlen-sweep-n150",  # N150/P150: sweeps 8k→32k (skips <8k to avoid L1 CB clash), Phase 1: no output validation
         "seqlen-sweep-8k",  # single-chip (N150/P150): sweeps 1k→8k, Phase 1: no output validation
         "seqlen-sweep-32k",  # single-chip (N150/P150): sweeps 1k→32k, Phase 1: no output validation
         "seqlen-sweep",  # multi-chip (T3K/LoudBox/Galaxy): sweeps 1k→128k, Phase 1: no output validation
