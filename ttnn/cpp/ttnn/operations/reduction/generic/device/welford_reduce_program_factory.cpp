@@ -59,6 +59,31 @@ constexpr const char* SCALED_DFB = "scaled";      // W-reduce only — scaled in
 constexpr const char* PARTIAL_DFB = "partial";    // HW-reduce only — per-column mean/var partials
 constexpr const char* COMBINED_DFB = "combined";  // HW-reduce only — combined scalar tile
 
+// Work-split state captured at cache-miss time. Welford's work split varies by
+// reduce_dim:
+//   - W-reduce: work units = NC * Ht (one per row of tiles)
+//   - H-reduce: work units = NC * Wt (one per column of tiles)
+//   - HW-reduce: work units = NC / reduce_batch_size (one per output scalar)
+// Each core gets a slice of work units; per-core RTAs include the reader's tile-id
+// math which differs per reduce_dim. Bundling these into a struct keeps
+// BuildRunParams' parameter list manageable.
+struct WelfordReduceSharedVariables {
+    std::vector<tt::tt_metal::CoreCoord> cores;
+    tt::tt_metal::CoreRangeSet core_group_1;
+    tt::tt_metal::CoreRangeSet core_group_2;
+    uint32_t num_work_units_per_core_group_1 = 0;
+    uint32_t num_work_units_per_core_group_2 = 0;
+
+    // Tensor metadata driving the per-core tile-id math.
+    uint32_t Wt = 0;
+    uint32_t Ht = 0;
+    uint32_t HtWt = 0;
+    uint32_t reduce_batch_size = 1;
+
+    // Per-core RTA shape depends on reduce_dim.
+    tt::tt_metal::ReduceOpDim reduce_dim = tt::tt_metal::ReduceOpDim::W;
+};
+
 struct WelfordWorkDistribution {
     uint32_t num_cores = 0;
     tt::tt_metal::CoreRangeSet all_cores;
@@ -263,7 +288,7 @@ m2::ProgramRunParams BuildRunParams(
 
 }  // namespace
 
-WelfordReduceProgramFactory::cached_program_t WelfordReduceProgramFactory::create(
+ttnn::device_operation::ProgramArtifacts WelfordReduceProgramFactory::create_program_spec(
     const WelfordReduceParams& operation_attributes,
     const tt::tt_metal::Tensor& tensor_args,
     tt::tt_metal::Tensor& tensor_return_value) {
@@ -674,9 +699,7 @@ WelfordReduceProgramFactory::cached_program_t WelfordReduceProgramFactory::creat
     };
     spec.work_units = {std::move(work_unit)};
 
-    Program program = m2::MakeProgramFromSpec(*a.device(), spec);
-
-    shared_variables_t shared{
+    WelfordReduceSharedVariables shared{
         .cores = wd.cores,
         .core_group_1 = wd.core_group_1,
         .core_group_2 = wd.core_group_2,
@@ -690,19 +713,8 @@ WelfordReduceProgramFactory::cached_program_t WelfordReduceProgramFactory::creat
     };
 
     auto run_params = BuildRunParams(shared, a.mesh_tensor(), output.mesh_tensor());
-    m2::SetProgramRunParameters(program, run_params);
 
-    return cached_program_t{std::move(program), std::move(shared)};
-}
-
-void WelfordReduceProgramFactory::override_runtime_arguments(
-    cached_program_t& cached_program,
-    const WelfordReduceParams& /*operation_attributes*/,
-    const tt::tt_metal::Tensor& tensor_args,
-    tt::tt_metal::Tensor& tensor_return_value) {
-    auto run_params =
-        BuildRunParams(cached_program.shared_variables, tensor_args.mesh_tensor(), tensor_return_value.mesh_tensor());
-    m2::SetProgramRunParameters(cached_program.program, run_params);
+    return ttnn::device_operation::ProgramArtifacts{.spec = std::move(spec), .run_params = std::move(run_params)};
 }
 
 }  // namespace ttnn::prim

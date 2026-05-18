@@ -2,17 +2,9 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Multi-core W reduction program factory, migrated to the Metal 2.0 host API.
-//
-// The factory follows ttnn's ProgramFactoryConcept (create + override_runtime_arguments)
-// because the device_operation framework does not yet have a first-class adapter for
-// ProgramSpec-based factories. The Program returned from MakeProgramFromSpec() is wrapped
-// into a CachedProgram alongside ReduceMultiCoreWSharedVariables.
-//
-// On cache hit, override_runtime_arguments() recomputes the per-node RTAs (only the
-// per-core work split is re-emitted; tensor base addresses come from the
-// TensorAccessor binding's CRTA slot, populated automatically by
-// SetProgramRunParameters() from the supplied TensorArg refs).
+// Multi-core W reduction program factory, built on the Metal 2.0 host API.
+// Satisfies ProgramSpecFactoryConcept; the framework adapter handles Program
+// construction and cache-hit dispatch (UpdateTensorArgs).
 
 #include "reduce_op_multi_core_w_program_factory.hpp"
 
@@ -56,10 +48,19 @@ constexpr const char* W_WORK_UNIT = "all_workers";
 constexpr const char* W_INPUT_TENSOR = "input_tensor";
 constexpr const char* W_OUTPUT_TENSOR = "output_tensor";
 
-// Determine the work distribution across cores. Mirrors the legacy factory; lifted
-// into a helper because both create() and override_runtime_arguments() consume it
-// (create uses it to build the spec; override uses the cached snapshot in
-// shared_variables to re-emit RTAs).
+// Work-split state captured at cache-miss time. Kept as a struct so BuildRunParams
+// can take a single argument and so each per-core RTA helper has explicit access
+// to the same data the spec was built with.
+struct ReduceMultiCoreWSharedVariables {
+    std::vector<tt::tt_metal::CoreCoord> cores;
+    tt::tt_metal::CoreRangeSet core_group_1;
+    tt::tt_metal::CoreRangeSet core_group_2;
+    uint32_t num_rows_per_core_group_1 = 0;
+    uint32_t num_rows_per_core_group_2 = 0;
+    uint32_t Wt = 0;
+};
+
+// Work distribution across cores. Mirrors the legacy factory's split.
 struct WWorkDistribution {
     uint32_t num_cores = 0;
     tt::tt_metal::CoreRangeSet all_cores;
@@ -187,7 +188,7 @@ m2::ProgramRunParams BuildRunParams(
 
 }  // namespace
 
-ReduceMultiCoreWProgramFactory::cached_program_t ReduceMultiCoreWProgramFactory::create(
+ttnn::device_operation::ProgramArtifacts ReduceMultiCoreWProgramFactory::create_program_spec(
     const ReduceParams& operation_attributes,
     const tt::tt_metal::Tensor& tensor_args,
     tt::tt_metal::Tensor& tensor_return_value) {
@@ -445,9 +446,7 @@ ReduceMultiCoreWProgramFactory::cached_program_t ReduceMultiCoreWProgramFactory:
     };
     spec.work_units = {std::move(work_unit)};
 
-    Program program = m2::MakeProgramFromSpec(*a.device(), spec);
-
-    shared_variables_t shared{
+    ReduceMultiCoreWSharedVariables shared{
         .cores = wd.cores,
         .core_group_1 = wd.core_group_1,
         .core_group_2 = wd.core_group_2,
@@ -457,19 +456,8 @@ ReduceMultiCoreWProgramFactory::cached_program_t ReduceMultiCoreWProgramFactory:
     };
 
     auto run_params = BuildRunParams(shared, a.mesh_tensor(), output.mesh_tensor());
-    m2::SetProgramRunParameters(program, run_params);
 
-    return cached_program_t{std::move(program), std::move(shared)};
-}
-
-void ReduceMultiCoreWProgramFactory::override_runtime_arguments(
-    cached_program_t& cached_program,
-    const ReduceParams& /*operation_attributes*/,
-    const tt::tt_metal::Tensor& tensor_args,
-    tt::tt_metal::Tensor& tensor_return_value) {
-    auto run_params =
-        BuildRunParams(cached_program.shared_variables, tensor_args.mesh_tensor(), tensor_return_value.mesh_tensor());
-    m2::SetProgramRunParameters(cached_program.program, run_params);
+    return ttnn::device_operation::ProgramArtifacts{.spec = std::move(spec), .run_params = std::move(run_params)};
 }
 
 }  // namespace ttnn::prim

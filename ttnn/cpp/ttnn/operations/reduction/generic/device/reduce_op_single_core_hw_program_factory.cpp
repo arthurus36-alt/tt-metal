@@ -48,6 +48,16 @@ constexpr const char* HW_WORK_UNIT = "single_core";
 constexpr const char* HW_INPUT_TENSOR = "input_tensor";
 constexpr const char* HW_OUTPUT_TENSOR = "output_tensor";
 
+// Cache-miss work-split values, gathered into a struct to keep BuildRunParams'
+// parameter list manageable. Single-core HW reduction has no actual split; the
+// struct records the chosen core and the tile counts that drive the per-core
+// RTAs.
+struct ReduceSingleCoreHwSharedVariables {
+    tt::tt_metal::CoreCoord core;
+    uint32_t num_tensor_tiles = 0;
+    uint32_t out_dim_divider = 0;  // Ht * Wt
+};
+
 m2::ProgramRunParams BuildRunParams(
     const ReduceSingleCoreHwSharedVariables& shared,
     bool negate,
@@ -100,7 +110,7 @@ m2::ProgramRunParams BuildRunParams(
 
 }  // namespace
 
-ReduceSingleCoreHwProgramFactory::cached_program_t ReduceSingleCoreHwProgramFactory::create(
+ttnn::device_operation::ProgramArtifacts ReduceSingleCoreHwProgramFactory::create_program_spec(
     const ReduceParams& operation_attributes,
     const tt::tt_metal::Tensor& tensor_args,
     tt::tt_metal::Tensor& tensor_return_value) {
@@ -413,37 +423,15 @@ ReduceSingleCoreHwProgramFactory::cached_program_t ReduceSingleCoreHwProgramFact
     };
     spec.work_units = {std::move(work_unit)};
 
-    Program program = m2::MakeProgramFromSpec(*a.device(), spec);
-
-    shared_variables_t shared{
+    ReduceSingleCoreHwSharedVariables shared{
         .core = core_coord,
         .num_tensor_tiles = num_tensor_tiles,
         .out_dim_divider = out_dim_divider,
     };
 
     auto run_params = BuildRunParams(shared, operation_attributes.negate, Ht, a.mesh_tensor(), output.mesh_tensor());
-    m2::SetProgramRunParameters(program, run_params);
 
-    return cached_program_t{std::move(program), std::move(shared)};
-}
-
-void ReduceSingleCoreHwProgramFactory::override_runtime_arguments(
-    cached_program_t& cached_program,
-    const ReduceParams& operation_attributes,
-    const tt::tt_metal::Tensor& tensor_args,
-    tt::tt_metal::Tensor& tensor_return_value) {
-    const auto& shape = tensor_args.padded_shape();
-    const uint32_t H = shape[2];
-    const uint32_t tile_height = tensor_args.tensor_spec().tile().get_height();
-    const uint32_t Ht = H / tile_height;
-
-    auto run_params = BuildRunParams(
-        cached_program.shared_variables,
-        operation_attributes.negate,
-        Ht,
-        tensor_args.mesh_tensor(),
-        tensor_return_value.mesh_tensor());
-    m2::SetProgramRunParameters(cached_program.program, run_params);
+    return ttnn::device_operation::ProgramArtifacts{.spec = std::move(spec), .run_params = std::move(run_params)};
 }
 
 }  // namespace ttnn::prim
