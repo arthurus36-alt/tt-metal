@@ -398,11 +398,10 @@ SDPAProgramFactory::cached_program_t SDPAProgramFactory::create(
     auto [qk_out_subblock_h, qk_out_subblock_w] =
         detail::determine_largest_subblock_size(Sq_chunk_t, Sk_chunk_t, dst_size);
 
-    // global_q_scheduling's linear (nb, nq, q_chunk) iteration is wired into the legacy standard
-    // compute kernel only — the streaming v2 path's hierarchical (nb, nq) loop is left untouched
-    // here, so disable streaming when global_q_scheduling is enabled.
+    // global_q_scheduling's linear (nb, nq, q_chunk) iteration is wired into both the standard
+    // and streaming-v2 compute paths — the reader/writer push CBs in the same global-iter order
+    // for both, so streaming can be selected freely when its own preconditions hold.
     const bool use_streaming_compute =
-        !global_q_scheduling &&
         can_use_streaming_compute(use_provided_mask, use_attention_sink, sliding_window_size, fp32_dest_acc_en);
 
     const bool lightweight_causal = is_causal && !use_provided_mask && sliding_window_size.value_or(0) == 0;

@@ -152,47 +152,67 @@ void kernel_main() {
             cb_wait_front(cb_mask_in, 2);
         }
 
-        for (uint32_t phase = 0; phase < num_phases; ++phase) {
-            const uint32_t phase_chunked_offset =
-                (phase == 0) ? chunked_q_chunk_offset_phase_1 : chunked_q_chunk_offset_phase_2;
-            for (uint32_t nb = local_batch_start; nb < local_batch_end; ++nb) {
-                for (uint32_t nq = local_nh_start; nq < local_nh_end; ++nq) {
-                    sdpa_standard_v2<
-                        Sq_chunk_t,
-                        Sk_chunk_t,
-                        valid_Skt,
-                        DHt,
-                        vDHt,
-                        scale_fp32,
-                        qk_subblock_h,
-                        qk_subblock_w,
-                        out_subblock_h,
-                        out_subblock_w,
-                        use_padded_mask,
-                        cb_q_in,
-                        cb_k_in,
-                        cb_v_in,
-                        cb_qk_im,
-                        cb_identity_scale_in,
-                        cb_exp_max_diff,
-                        cb_col_identity,
-                        cb_recip_scratch,
-                        cb_out,  // normalized output goes directly to output CB
-                        cb_mask_in,
-                        uniform_dataformat,
-                        is_causal>(
-                        q_chunks_per_core,
-                        k_num_chunks,
-                        cb_out_im_A,
-                        cb_out_im_B,
-                        cb_max_A,
-                        cb_max_B,
-                        cb_sum_A,
-                        cb_sum_B,
-                        local_q_start,
-                        phase_chunked_offset,
-                        lw_mask,
-                        q_num_chunks);
+        // Single per-(nb, nq) sdpa_standard_v2 invocation; lifted so the hierarchical and global-Q
+        // outer iterations below share one definition.
+        auto run_sdpa_standard_v2 =
+            [&](uint32_t q_chunks_per_call, uint32_t inner_q_start, uint32_t phase_chunked_offset) {
+                sdpa_standard_v2<
+                    Sq_chunk_t,
+                    Sk_chunk_t,
+                    valid_Skt,
+                    DHt,
+                    vDHt,
+                    scale_fp32,
+                    qk_subblock_h,
+                    qk_subblock_w,
+                    out_subblock_h,
+                    out_subblock_w,
+                    use_padded_mask,
+                    cb_q_in,
+                    cb_k_in,
+                    cb_v_in,
+                    cb_qk_im,
+                    cb_identity_scale_in,
+                    cb_exp_max_diff,
+                    cb_col_identity,
+                    cb_recip_scratch,
+                    cb_out,  // normalized output goes directly to output CB
+                    cb_mask_in,
+                    uniform_dataformat,
+                    is_causal>(
+                    q_chunks_per_call,
+                    k_num_chunks,
+                    cb_out_im_A,
+                    cb_out_im_B,
+                    cb_max_A,
+                    cb_max_B,
+                    cb_sum_A,
+                    cb_sum_B,
+                    inner_q_start,
+                    phase_chunked_offset,
+                    lw_mask,
+                    q_num_chunks);
+            };
+
+        if constexpr (global_q_scheduling) {
+            // Global Q scheduling: flat range over B*NQH*q_num_chunks chunks. chunked prefill is
+            // rejected on host so num_phases==1 and chunked_q_chunk_offset==0. Reader/writer push
+            // CBs in this exact iter order; each call below processes one (nb, nq, q_chunk) triple.
+            for (uint32_t global_q_iter = 0; global_q_iter < global_q_count; ++global_q_iter) {
+                const uint32_t remapped =
+                    remap_q_index(global_q_start + global_q_iter, q_num_chunks, global_q_use_zigzag);
+                const uint32_t q_chunk_abs = remapped % q_num_chunks;
+                run_sdpa_standard_v2(
+                    /*q_chunks_per_call=*/1, /*inner_q_start=*/q_chunk_abs, /*phase_chunked_offset=*/0);
+            }
+        } else {
+            for (uint32_t phase = 0; phase < num_phases; ++phase) {
+                const uint32_t phase_chunked_offset =
+                    (phase == 0) ? chunked_q_chunk_offset_phase_1 : chunked_q_chunk_offset_phase_2;
+                for (uint32_t nb = local_batch_start; nb < local_batch_end; ++nb) {
+                    for (uint32_t nq = local_nh_start; nq < local_nh_end; ++nq) {
+                        run_sdpa_standard_v2(q_chunks_per_core, local_q_start, phase_chunked_offset);
+                    }
                 }
             }
         }
