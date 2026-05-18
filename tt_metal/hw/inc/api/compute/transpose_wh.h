@@ -38,8 +38,8 @@ ALWI void transpose_wh_init(uint32_t icb, uint32_t ocb, uint32_t call_line = __b
 
 #ifndef ARCH_QUASAR
     const bool is_int32 = (src_format & 0xf) == (std::uint32_t)DataFormat::Int32;
-    const bool enable_unpack_to_dest = (dst_format == (std::uint32_t)DataFormat::Float32) ||
-                                       (dst_format == (std::uint32_t)DataFormat::UInt32) ||
+    const bool is_float32 = dst_format == (std::uint32_t)DataFormat::Float32;
+    const bool enable_unpack_to_dest = is_float32 || (dst_format == (std::uint32_t)DataFormat::UInt32) ||
                                        (dst_format == (std::uint32_t)DataFormat::Int32);
     if (is_int32) {
         UNPACK((llk_unpack_hw_configure<DST_ACCUM_MODE, true>(icb)));
@@ -51,7 +51,14 @@ ALWI void transpose_wh_init(uint32_t icb, uint32_t ocb, uint32_t call_line = __b
         UNPACK((llk_unpack_A_init<BroadcastType::NONE, false, EltwiseBinaryReuseDestType::NONE, UnpackToDestEn>(
             true, false, icb)));
         MATH((llk_math_eltwise_unary_datacopy_init<DataCopyType::A2D, DST_ACCUM_MODE, BroadcastType::NONE>(icb)));
-        MATH((llk_math_transpose_dest_init<false, true>()));
+        // Select the MOP variant by data type: Float32 uses the MOP that keeps the
+        // full 32-bit mantissa in DEST; Int32/UInt32 use the MOP that preserves the
+        // lower 16 bits across the transfer.
+        if (is_float32) {
+            MATH((llk_math_transpose_dest_init<false, true, true>()));
+        } else {
+            MATH((llk_math_transpose_dest_init<false, true, false>()));
+        }
     } else {
         UNPACK((llk_unpack_A_init<BroadcastType::NONE, true, EltwiseBinaryReuseDestType::NONE>(true, true, icb)));
         MATH((llk_math_eltwise_unary_datacopy_init<DataCopyType::A2D, DST_ACCUM_MODE, BroadcastType::NONE>(icb)));
@@ -91,14 +98,18 @@ ALWI void transpose_wh_init_short(uint32_t icb, uint32_t call_line = __builtin_L
     const std::uint32_t dst_format = get_operand_dst_format(icb);
 
 #ifndef ARCH_QUASAR
-    const bool enable_unpack_to_dest = (dst_format == (std::uint32_t)DataFormat::Float32) ||
-                                       (dst_format == (std::uint32_t)DataFormat::UInt32) ||
+    const bool is_float32 = dst_format == (std::uint32_t)DataFormat::Float32;
+    const bool enable_unpack_to_dest = is_float32 || (dst_format == (std::uint32_t)DataFormat::UInt32) ||
                                        (dst_format == (std::uint32_t)DataFormat::Int32);
     if (enable_unpack_to_dest) {
         UNPACK((llk_unpack_A_init<BroadcastType::NONE, false, EltwiseBinaryReuseDestType::NONE, UnpackToDestEn>(
             true, false, icb)));
         MATH((llk_math_eltwise_unary_datacopy_init<DataCopyType::A2D, DST_ACCUM_MODE, BroadcastType::NONE>(icb)));
-        MATH((llk_math_transpose_dest_init<false, true>()));
+        if (is_float32) {
+            MATH((llk_math_transpose_dest_init<false, true, true>()));
+        } else {
+            MATH((llk_math_transpose_dest_init<false, true, false>()));
+        }
     } else {
         UNPACK((llk_unpack_A_init<BroadcastType::NONE, true, EltwiseBinaryReuseDestType::NONE>(true, true, icb)));
         MATH((llk_math_eltwise_unary_datacopy_init<DataCopyType::A2D, DST_ACCUM_MODE, BroadcastType::NONE>(icb)));
@@ -137,15 +148,19 @@ ALWI void transpose_wh_tile(uint32_t icb, uint32_t itile, uint32_t idst) {
     const std::uint32_t dst_format = get_operand_dst_format(icb);
 
 #ifndef ARCH_QUASAR
-    const bool enable_unpack_to_dest = (dst_format == (std::uint32_t)DataFormat::Float32) ||
-                                       (dst_format == (std::uint32_t)DataFormat::UInt32) ||
+    const bool is_float32 = dst_format == (std::uint32_t)DataFormat::Float32;
+    const bool enable_unpack_to_dest = is_float32 || (dst_format == (std::uint32_t)DataFormat::UInt32) ||
                                        (dst_format == (std::uint32_t)DataFormat::Int32);
     if (enable_unpack_to_dest) {
         UNPACK(
             (llk_unpack_A<BroadcastType::NONE, false, EltwiseBinaryReuseDestType::NONE, UnpackToDestEn>(icb, itile)));
         UNPACK((llk_unpack_set_srcb_dummy_valid()));
         MATH((llk_math_eltwise_unary_datacopy<DataCopyType::A2D, DST_ACCUM_MODE, BroadcastType::NONE, UnpackToDestEn>(idst, icb)));
-        MATH((llk_math_transpose_dest<false, true>(idst)));
+        if (is_float32) {
+            MATH((llk_math_transpose_dest<false, true, true>(idst)));
+        } else {
+            MATH((llk_math_transpose_dest<false, true, false>(idst)));
+        }
     } else {
         UNPACK((llk_unpack_A<BroadcastType::NONE, false>(icb, itile)));
         MATH((llk_math_eltwise_unary_datacopy<DataCopyType::A2D, DST_ACCUM_MODE, BroadcastType::NONE>(idst, icb)));

@@ -19,9 +19,12 @@ namespace ckernel {
  * Performs a first-call or switch-from-another-op tile hw reconfiguration step needed for transpose_wh_dest to be
  * executed correctly.
  */
-template <bool is_32bit = false>
+// is_fp32 = true selects the LLK transpose-dest MOP variant that keeps the
+// full Float32 mantissa in DEST; is_fp32 = false selects the variant that
+// preserves the lower 16 bits across the transpose (Int32 / UInt32).
+template <bool is_32bit = false, bool is_fp32 = false>
 ALWI void transpose_wh_dest_init_short() {
-    MATH((llk_math_transpose_dest_init<true, is_32bit>()));
+    MATH((llk_math_transpose_dest_init<true, is_32bit, is_fp32>()));
 }
 
 // clang-format off
@@ -37,10 +40,10 @@ ALWI void transpose_wh_dest_init_short() {
  * | idst           | The index of the tile in DST REG to transpose           | uint32_t | Must be less than the acquired size of DST REG | True     |
  */
  // clang-format on
-template <bool is_32bit = false>
+template <bool is_32bit = false, bool is_fp32 = false>
 ALWI void transpose_wh_dest(uint32_t idst) {
     UNPACK((llk_unpack_set_srcb_dummy_valid()));
-    MATH((llk_math_transpose_dest<true, is_32bit>(idst)));
+    MATH((llk_math_transpose_dest<true, is_32bit, is_fp32>(idst)));
 }
 
 }  // namespace ckernel
