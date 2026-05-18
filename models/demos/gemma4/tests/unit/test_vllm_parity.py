@@ -581,24 +581,29 @@ def test_full_model_parity_uniform_vs_vllm(mesh_device, reset_seeds, request):
     decode_steps = 4
     mesh_config = MeshConfig(mesh_device.shape, decode=ModeConfig(tp=1))
 
-    def _build_model():
-        return Gemma4Model(
-            mesh_device=mesh_device,
-            hf_config=model_args,
-            state_dict=tt_state,
-            ccl_manager=None,
-            dtype=ttnn.bfloat16,
-            tensor_cache_path=None,
-            mesh_config=mesh_config,
-            max_seq_len=seq_len + decode_steps + 32,
-            max_local_batch_size=1,
-            num_layers=num_layers,
-        )
+    # Single shared model across both passes — weights are heavy enough on
+    # 26B-A4B (128 experts × 6 layers) that two simultaneous instances OOM
+    # the per-bank DRAM budget on wh_llmbox. The model's own kv_cache feeds
+    # the uniform pass via the kv_cache=None fall-through, and the vLLM pass
+    # supplies its harness-allocated cache + per-layer page tables as
+    # explicit kwargs. Both passes touch disjoint cache buffers so neither
+    # pollutes the other's state.
+    tt_model = Gemma4Model(
+        mesh_device=mesh_device,
+        hf_config=model_args,
+        state_dict=tt_state,
+        ccl_manager=None,
+        dtype=ttnn.bfloat16,
+        tensor_cache_path=None,
+        mesh_config=mesh_config,
+        max_seq_len=seq_len + decode_steps + 32,
+        max_local_batch_size=1,
+        num_layers=num_layers,
+    )
 
     tokens = torch.randint(0, model_args.vocab_size, (1, seq_len), dtype=torch.long)
 
-    # ── Uniform path: prefill + N decode steps ──────────────────────
-    tt_model_uniform = _build_model()
+    # ── Uniform path: prefill ───────────────────────────────────────
     replicate = _replicate_mapper(mesh_device)
     tt_tokens = ttnn.from_torch(
         tokens.to(torch.int32),
@@ -607,16 +612,16 @@ def test_full_model_parity_uniform_vs_vllm(mesh_device, reset_seeds, request):
         dtype=ttnn.uint32,
         mesh_mapper=replicate,
     )
-    tt_embeds = tt_model_uniform.embed_tokens(tt_tokens)
+    tt_embeds = tt_model.embed_tokens(tt_tokens)
     tt_embeds = ttnn.reshape(tt_embeds, (1, 1, seq_len, model_args.hidden_size))
     tt_embeds = ttnn.to_layout(tt_embeds, ttnn.TILE_LAYOUT)
-    uniform_prefill_logits = tt_model_uniform(
+    uniform_prefill_logits = tt_model(
         tt_embeds, rope_mats=None, position_idx=None, page_table=None, kv_caches=None, is_decode=False
     )
     uniform_prefill_torch = _from_device(uniform_prefill_logits, mesh_device).float()
+    uniform_prefill_logits.deallocate(True)
 
-    # ── vLLM path: same prefill ─────────────────────────────────────
-    tt_model_vllm = _build_model()
+    # ── vLLM path: same model, harness-allocated cache + page tables ─
     requested_block_size = 64
     max_model_len = seq_len + decode_steps + 32
     layout = Gemma4VllmLayout.from_hf_config(
@@ -633,10 +638,6 @@ def test_full_model_parity_uniform_vs_vllm(mesh_device, reset_seeds, request):
     pool = Gemma4VllmRequestPool(layout)
     req = pool.allocate_request(num_prefill_tokens=seq_len)
     per_layer_pts = pool.per_layer_page_tables(req)
-    # Stash as the model expects (``_active_page_tables_per_layer``
-    # populated by :class:`HybridAttentionForCausalLM`'s route helper
-    # under vLLM; we set it directly here without the bridge).
-    tt_model_vllm._active_page_tables_per_layer = per_layer_pts
 
     tt_tokens_v = ttnn.from_torch(
         tokens.to(torch.int32),
@@ -645,17 +646,19 @@ def test_full_model_parity_uniform_vs_vllm(mesh_device, reset_seeds, request):
         dtype=ttnn.uint32,
         mesh_mapper=replicate,
     )
-    tt_embeds_v = tt_model_vllm.embed_tokens(tt_tokens_v)
+    tt_embeds_v = tt_model.embed_tokens(tt_tokens_v)
     tt_embeds_v = ttnn.reshape(tt_embeds_v, (1, 1, seq_len, model_args.hidden_size))
     tt_embeds_v = ttnn.to_layout(tt_embeds_v, ttnn.TILE_LAYOUT)
-    vllm_prefill_logits = tt_model_vllm.ttnn_prefill_forward(
+    vllm_prefill_logits = tt_model.ttnn_prefill_forward(
         tt_embeds_v,
         page_table=None,
         kv_cache=kv_per_layer,
         input_ids_torch=tokens,
         embeds_torch=None,
+        page_tables_per_layer=per_layer_pts,
     )
     vllm_prefill_torch = _from_device(vllm_prefill_logits, mesh_device).float()
+    vllm_prefill_logits.deallocate(True)
 
     # Prefill parity — same prompt + same weights + same RoPE, the
     # only difference is paged cache layout. Mismatch here is a bug in
@@ -685,14 +688,30 @@ def test_full_model_parity_uniform_vs_vllm(mesh_device, reset_seeds, request):
 def _build_parity_models(
     mesh_device, hf_text_config, model_args, tt_state, mesh_config, num_layers, max_total_len, uniform_paged_cfg
 ):
-    """Build two Gemma4Model instances backed by different kv-cache layouts.
+    """Build the Gemma4Model(s) used by the parity tests.
 
-    The uniform model owns its kv-cache (paged, block_size=64); the vllm
-    model is constructed with ``create_kv_cache=False`` so its forward
-    paths consume the harness-allocated cache passed in via the
-    ``kv_cache=`` kwarg. Both load the same weights from ``tt_state``.
+    Originally returned two distinct instances (one owning the uniform
+    kv-cache, the other with ``create_kv_cache=False`` so its forward
+    paths consumed the harness-allocated cache via ``kv_cache=``). For
+    26B-A4B (128 experts × 6 layers) two weight copies plus the
+    harness cache overflow the per-bank DRAM budget on wh_llmbox.
+
+    Now returns the *same* instance twice: the model's internal kv-cache
+    feeds the uniform pass (``kv_caches=None`` fall-through), and the
+    vLLM pass supplies its harness-allocated cache + per-layer page
+    tables as explicit ``kv_cache=`` / ``page_tables_per_layer=`` kwargs.
+    Both passes touch disjoint cache buffers, so weights stay shared
+    without state cross-pollution. The two-variable signature is kept
+    so existing call sites (uniform / vllm method calls on separately
+    named locals) need no churn.
+
+    The ``_active_page_tables_per_layer`` stash on the vllm side is
+    fine under this single-model arrangement because every vllm caller
+    in this file either passes ``page_tables_per_layer=`` explicitly
+    (overriding the stash) or ``del``-s it before the next uniform
+    call — none rely on the model carrying it between passes.
     """
-    tt_model_uniform = Gemma4Model(
+    tt_model = Gemma4Model(
         mesh_device=mesh_device,
         hf_config=model_args,
         state_dict=tt_state,
@@ -705,20 +724,7 @@ def _build_parity_models(
         num_layers=num_layers,
         paged_attention_config=uniform_paged_cfg,
     )
-    tt_model_vllm = Gemma4Model(
-        mesh_device=mesh_device,
-        hf_config=model_args,
-        state_dict=tt_state,
-        ccl_manager=None,
-        dtype=ttnn.bfloat16,
-        tensor_cache_path=None,
-        mesh_config=mesh_config,
-        max_seq_len=max_total_len,
-        max_local_batch_size=1,
-        num_layers=num_layers,
-        create_kv_cache=False,
-    )
-    return tt_model_uniform, tt_model_vllm
+    return tt_model, tt_model
 
 
 def _decode_step_inputs(model, mesh_device, token_id, position):
