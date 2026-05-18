@@ -332,39 +332,11 @@ SDPAProgramFactory::cached_program_t SDPAProgramFactory::create(
         num_cores,
         device->compute_with_storage_grid_size().x * device->compute_with_storage_grid_size().y);
 
-    // Global Q scheduling (optional): treat (batch, head, q_chunk) as one linear space and split
-    // it evenly across cores instead of the hierarchical batch -> heads -> q_chunks split. Zigzag
-    // sub-mode engages automatically for causal + even q_num_chunks to pair light/heavy q_chunks
-    // per core. Default (false) keeps the hierarchical parallelization.
-    const bool global_q_scheduling = program_config.has_value() && program_config->global_q_scheduling;
-
-    // Parallelization scheme
-    // We will choose parallelization factors for batch, num_heads, and q_seq_len in that order
-    uint32_t batch_parallel_factor = std::min(B, num_cores);
-    uint32_t nh_parallel_factor = std::min(num_cores / batch_parallel_factor, NQH);
-    uint32_t q_parallel_factor = std::min(num_cores / (batch_parallel_factor * nh_parallel_factor), q_num_chunks);
-
-    TT_FATAL(
-        batch_parallel_factor * nh_parallel_factor * q_parallel_factor <= num_cores,
-        "Parallelism must not exceed number of cores. Got {}, expected at most {}.",
-        batch_parallel_factor * nh_parallel_factor * q_parallel_factor,
-        num_cores);
-
-    log_debug(tt::LogOp, "Parallelization scheme:");
-    log_debug(tt::LogOp, "batch_parallel_factor: {}", batch_parallel_factor);
-    log_debug(tt::LogOp, "nh_parallel_factor: {}", nh_parallel_factor);
-    log_debug(tt::LogOp, "q_parallel_factor: {}", q_parallel_factor);
-
-    // Ceiling divide to allow for non-perfect divisions
-    const uint32_t batch_per_core = (B + batch_parallel_factor - 1) / batch_parallel_factor;
-    const uint32_t nh_per_core = (NQH + nh_parallel_factor - 1) / nh_parallel_factor;
-    const uint32_t q_per_core = (q_num_chunks + q_parallel_factor - 1) / q_parallel_factor;
-
-    // Per-core global Q assignments (only used when global_q_scheduling is true). Evenly split
-    // total_q_chunks across cores. With zigzag sub-mode (causal + even num_q_chunks), distribute in
-    // pairs so every core gets balanced light/heavy work after linear_to_zigzag remap.
+    // Global Q scheduling: distribute the flat B*NQH*q_num_chunks Q-chunk space evenly across cores.
+    // With zigzag sub-mode (causal + even num_q_chunks), distribute in pairs so every core gets
+    // balanced light/heavy work after linear_to_zigzag remap.
     const uint32_t total_q_chunks = B * NQH * q_num_chunks;
-    const bool global_q_zigzag = global_q_scheduling && is_causal && (q_num_chunks % 2 == 0);
+    const bool global_q_zigzag = is_causal && (q_num_chunks % 2 == 0);
     uint32_t global_q_base_chunks_per_core = 0;
     uint32_t global_q_cores_doing_extra = 0;
     uint32_t global_q_extra_chunks_per_core = 0;
@@ -381,11 +353,7 @@ SDPAProgramFactory::cached_program_t SDPAProgramFactory::create(
     const uint32_t max_global_q_chunks_per_core =
         global_q_base_chunks_per_core + (global_q_cores_doing_extra > 0 ? global_q_extra_chunks_per_core : 0);
 
-    const uint32_t q_buffer_factor_hier = (q_per_core > 1) ? 2 : 1;
-    const uint32_t q_buffer_factor_global_q = (max_global_q_chunks_per_core > 1) ? 2 : 1;
-    const uint32_t q_buffer_factor = global_q_scheduling ? q_buffer_factor_global_q : q_buffer_factor_hier;
-
-    log_debug(tt::LogOp, "q_per_core: {}", q_per_core);
+    const uint32_t q_buffer_factor = (max_global_q_chunks_per_core > 1) ? 2 : 1;
 
     // Host code is responsible for determining matmul configuration
     const uint32_t dst_size = fp32_dest_acc_en ? 4 : 8;
@@ -394,9 +362,6 @@ SDPAProgramFactory::cached_program_t SDPAProgramFactory::create(
     auto [qk_out_subblock_h, qk_out_subblock_w] =
         detail::determine_largest_subblock_size(Sq_chunk_t, Sk_chunk_t, dst_size);
 
-    // global_q_scheduling's linear (nb, nq, q_chunk) iteration is wired into both the standard
-    // and streaming-v2 compute paths — the reader/writer push CBs in the same global-iter order
-    // for both, so streaming can be selected freely when its own preconditions hold.
     const bool use_streaming_compute =
         can_use_streaming_compute(use_provided_mask, use_attention_sink, sliding_window_size, fp32_dest_acc_en);
 
@@ -546,7 +511,7 @@ SDPAProgramFactory::cached_program_t SDPAProgramFactory::create(
     // Global Q scheduling tail args: [zigzag, enabled]. Order is fixed; kernel reads them via
     // chunk_start_idx_args.next_compile_time_args_offset() (+0 and +1).
     reader_compile_time_args.push_back(static_cast<uint32_t>(global_q_zigzag));
-    reader_compile_time_args.push_back(static_cast<uint32_t>(global_q_scheduling));
+    reader_compile_time_args.push_back(1u);
 
     // Create semaphores for KV chain forwarding BEFORE kernel compilation (non-causal only)
     // This must happen before CreateKernel so the actual semaphore IDs are in the compile-time args
@@ -604,7 +569,7 @@ SDPAProgramFactory::cached_program_t SDPAProgramFactory::create(
     // Global Q scheduling tail args: [zigzag, enabled]. Order is fixed; kernel reads them via
     // out_args.next_compile_time_args_offset() (+0 and +1).
     writer_compile_time_args.push_back(static_cast<uint32_t>(global_q_zigzag));
-    writer_compile_time_args.push_back(static_cast<uint32_t>(global_q_scheduling));
+    writer_compile_time_args.push_back(1u);
 
     const bool uniform_dataformat = check_uniform_dataformat(
         input_tensor_q, input_tensor_k, input_tensor_v, output_tensor, attn_mask, use_streaming_compute);
@@ -646,7 +611,7 @@ SDPAProgramFactory::cached_program_t SDPAProgramFactory::create(
         (std::uint32_t)uniform_dataformat,     // arg 32: skip reconfig when all formats match
         k_partial_col,                         // arg 33: K partial-tile col (0 = no partial)
         (std::uint32_t)global_q_zigzag,        // arg 34: global Q scheduling zigzag sub-mode
-        (std::uint32_t)global_q_scheduling,    // arg 35: global Q scheduling enabled
+        1u,                                    // arg 35: global Q scheduling enabled
     };
 
     TensorAccessorArgs(output_tensor.buffer()).append_to(compute_compile_time_args);
@@ -658,21 +623,10 @@ SDPAProgramFactory::cached_program_t SDPAProgramFactory::create(
     defines["DHT_GRANULARITY"] = std::to_string(dht_granularity);
     defines["REDUCE_GRANULARITY"] = std::to_string(reduce_granularity);
     defines["EXP_APPROX_MODE"] = std::to_string(exp_approx_mode);
-    uint32_t balanced_q_parallel =
-        (!global_q_scheduling && is_causal && (q_per_core * q_parallel_factor == q_num_chunks) &&
-         (q_per_core % 2 == 0));
-    if (balanced_q_parallel) {
-        defines["BALANCED_Q_PARALLEL"] = "1";
-    }
-    // Global Q scheduling: enabled and zigzag sub-mode are both passed as compile-time args
-    // (global_q_scheduling, global_q_zigzag) to reader/writer/compute above. Kernels gate on
-    // these via `if constexpr`.
+    // Global Q scheduling: enabled and zigzag sub-mode are both passed as compile-time args to
+    // reader/writer/compute above. Kernels gate on these via `if constexpr`.
 
-    log_debug(tt::LogOp, "BALANCED_Q_PARALLEL: {}", balanced_q_parallel);
-    log_debug(
-        tt::LogOp,
-        "global_q_scheduling: {}",
-        global_q_scheduling ? (global_q_zigzag ? "1 (zigzag)" : "1 (linear)") : "0 (hierarchical)");
+    log_debug(tt::LogOp, "global_q_zigzag: {}", global_q_zigzag);
 
     // NOTE: CreateKernel calls are deferred until after chain construction so that
     // the mcast_enabled compile-time arg can be determined first.
@@ -851,10 +805,8 @@ SDPAProgramFactory::cached_program_t SDPAProgramFactory::create(
     std::vector<std::vector<HeadSegmentRef>> head_segments;
     uint32_t mcast_chains = 0;
 
-    // KV chain forwarding applies to non-causal, non-chunked workloads. Under global_q_scheduling
-    // each core's linear range is decomposed into (nb, nq, q_chunk_range) segments below — chain
-    // construction is otherwise identical to the hierarchical path. Causal+global_q (zigzag) is
-    // not eligible regardless: is_causal disables chains by definition.
+    // KV chain forwarding applies to non-causal, non-chunked workloads. Each core's linear global
+    // range is decomposed into (nb, nq, q_chunk_range) segments below to build per-head chains.
     if (!is_causal && !is_chunked) {
         head_segments.resize(total_heads);
 
@@ -888,57 +840,33 @@ SDPAProgramFactory::cached_program_t SDPAProgramFactory::create(
                 }
             };
 
-            if (global_q_scheduling) {
-                // Walk the core's [g_start, g_start + g_count) linear range and split into
-                // contiguous (nb, nq, q_chunk_range) segments. Non-causal here (chain section is
-                // !is_causal), so global_q_zigzag is off and the decompose is identity.
-                uint32_t g_start = i * global_q_base_chunks_per_core +
-                                   std::min(i, global_q_cores_doing_extra) * global_q_extra_chunks_per_core;
-                uint32_t g_count = global_q_base_chunks_per_core +
-                                   ((i < global_q_cores_doing_extra) ? global_q_extra_chunks_per_core : 0u);
-                if (g_start >= total_q_chunks) {
-                    g_start = total_q_chunks;
-                    g_count = 0;
-                } else if (g_start + g_count > total_q_chunks) {
-                    g_count = total_q_chunks - g_start;
-                }
-                work.global_q_start = g_start;
-                work.global_q_count = g_count;
+            // Walk the core's [g_start, g_start + g_count) linear range and split into
+            // contiguous (nb, nq, q_chunk_range) segments. Non-causal here (chain section is
+            // !is_causal), so global_q_zigzag is off and the decompose is identity.
+            uint32_t g_start = i * global_q_base_chunks_per_core +
+                               std::min(i, global_q_cores_doing_extra) * global_q_extra_chunks_per_core;
+            uint32_t g_count = global_q_base_chunks_per_core +
+                               ((i < global_q_cores_doing_extra) ? global_q_extra_chunks_per_core : 0u);
+            if (g_start >= total_q_chunks) {
+                g_start = total_q_chunks;
+                g_count = 0;
+            } else if (g_start + g_count > total_q_chunks) {
+                g_count = total_q_chunks - g_start;
+            }
+            work.global_q_start = g_start;
+            work.global_q_count = g_count;
 
-                uint32_t cursor = g_start;
-                const uint32_t g_end = g_start + g_count;
-                while (cursor < g_end) {
-                    const uint32_t nb = cursor / (NQH * q_num_chunks);
-                    const uint32_t nq = (cursor / q_num_chunks) % NQH;
-                    const uint32_t q_in_head = cursor % q_num_chunks;
-                    const uint32_t remaining_in_head = q_num_chunks - q_in_head;
-                    const uint32_t remaining_in_range = g_end - cursor;
-                    const uint32_t span = std::min(remaining_in_head, remaining_in_range);
-                    push_head_work(nb, nq, q_in_head, span);
-                    cursor += span;
-                }
-            } else {
-                uint32_t local_batch_start = (i / (nh_parallel_factor * q_parallel_factor)) * batch_per_core;
-                uint32_t local_batch_end = local_batch_start + batch_per_core;
-                uint32_t local_nh_start = ((i / q_parallel_factor) % nh_parallel_factor) * nh_per_core;
-                uint32_t local_nh_end = local_nh_start + nh_per_core;
-                uint32_t local_q_start = (i % q_parallel_factor) * q_per_core;
-                uint32_t local_q_end = local_q_start + q_per_core;
-
-                // Clamp to max values
-                local_batch_start = std::min(local_batch_start, B);
-                local_batch_end = std::min(local_batch_end, B);
-                local_nh_start = std::min(local_nh_start, NQH);
-                local_nh_end = std::min(local_nh_end, NQH);
-                local_q_start = std::min(local_q_start, q_num_chunks);
-                local_q_end = std::min(local_q_end, q_num_chunks);
-
-                // Track each (batch, head, q_chunk_range) this core handles
-                for (uint32_t b = local_batch_start; b < local_batch_end; ++b) {
-                    for (uint32_t h = local_nh_start; h < local_nh_end; ++h) {
-                        push_head_work(b, h, local_q_start, local_q_end - local_q_start);
-                    }
-                }
+            uint32_t cursor = g_start;
+            const uint32_t g_end = g_start + g_count;
+            while (cursor < g_end) {
+                const uint32_t nb = cursor / (NQH * q_num_chunks);
+                const uint32_t nq = (cursor / q_num_chunks) % NQH;
+                const uint32_t q_in_head = cursor % q_num_chunks;
+                const uint32_t remaining_in_head = q_num_chunks - q_in_head;
+                const uint32_t remaining_in_range = g_end - cursor;
+                const uint32_t span = std::min(remaining_in_head, remaining_in_range);
+                push_head_work(nb, nq, q_in_head, span);
+                cursor += span;
             }
 
             if (!work.head_work.empty()) {
@@ -1373,47 +1301,28 @@ SDPAProgramFactory::cached_program_t SDPAProgramFactory::create(
     for (uint32_t i = 0; i < num_cores; ++i) {
         CoreCoord core = {i % grid_size.x, i / grid_size.x};
 
-        // log_debug(tt::LogOp, "core: {} getting runtime args for idx {i}", core, i);
-        uint32_t local_batch_start = (i / (nh_parallel_factor * q_parallel_factor)) * batch_per_core;
-        uint32_t local_batch_end = local_batch_start + batch_per_core;
-        uint32_t local_nh_start = ((i / q_parallel_factor) % nh_parallel_factor) * nh_per_core;
-        uint32_t local_nh_end = local_nh_start + nh_per_core;
-        uint32_t local_q_start = (i % q_parallel_factor) * q_per_core;
-        uint32_t local_q_end = local_q_start + q_per_core;
-
-        // clamp all to max values for non-even partitioning
-        local_batch_start = std::min(local_batch_start, B);
-        local_batch_end = std::min(local_batch_end, B);
-        local_nh_start = std::min(local_nh_start, NQH);
-        local_nh_end = std::min(local_nh_end, NQH);
-        local_q_start = std::min(local_q_start, q_num_chunks);
-        local_q_end = std::min(local_q_end, q_num_chunks);
-
-        // Global Q scheduling per-core range (only used when SDPA_GLOBAL_Q_SCHED is compiled in).
-        uint32_t global_q_start = 0;
-        uint32_t global_q_count = 0;
-        if (global_q_scheduling) {
-            global_q_start = i * global_q_base_chunks_per_core +
-                             std::min(i, global_q_cores_doing_extra) * global_q_extra_chunks_per_core;
-            global_q_count = global_q_base_chunks_per_core +
-                             ((i < global_q_cores_doing_extra) ? global_q_extra_chunks_per_core : 0u);
-            if (global_q_start >= total_q_chunks) {
-                global_q_start = total_q_chunks;
-                global_q_count = 0;
-            } else if (global_q_start + global_q_count > total_q_chunks) {
-                global_q_count = total_q_chunks - global_q_start;
-            }
+        // Global Q scheduling per-core range: contiguous slice of the flat (B, NQH, q_num_chunks)
+        // space. Hierarchical local_batch/nh/q args are zeroed; kernels read them but only use them
+        // under the hierarchical path (which single-chip no longer takes).
+        uint32_t global_q_start = i * global_q_base_chunks_per_core +
+                                  std::min(i, global_q_cores_doing_extra) * global_q_extra_chunks_per_core;
+        uint32_t global_q_count =
+            global_q_base_chunks_per_core + ((i < global_q_cores_doing_extra) ? global_q_extra_chunks_per_core : 0u);
+        if (global_q_start >= total_q_chunks) {
+            global_q_start = total_q_chunks;
+            global_q_count = 0;
+        } else if (global_q_start + global_q_count > total_q_chunks) {
+            global_q_count = total_q_chunks - global_q_start;
         }
 
-        // log the above
-        log_debug(tt::LogOp, "core: {}", i);
-        log_debug(tt::LogOp, "x={},y={}", core.x, core.y);
-        log_debug(tt::LogOp, "local_batch_start: {}", local_batch_start);
-        log_debug(tt::LogOp, "local_batch_end: {}", local_batch_end);
-        log_debug(tt::LogOp, "local_nh_start: {}", local_nh_start);
-        log_debug(tt::LogOp, "local_nh_end: {}", local_nh_end);
-        log_debug(tt::LogOp, "local_q_start: {}", local_q_start);
-        log_debug(tt::LogOp, "local_q_end: {}", local_q_end);
+        log_debug(
+            tt::LogOp,
+            "core: {} x={} y={} global_q_start={} global_q_count={}",
+            i,
+            core.x,
+            core.y,
+            global_q_start,
+            global_q_count);
 
         // Get chain info for this core
         const auto& chain = core_chain_info[i];
@@ -1427,12 +1336,12 @@ SDPAProgramFactory::cached_program_t SDPAProgramFactory::create(
             attention_sink_addr,
             flexible_chunked ? operation_attributes.chunk_start_idx_tensor.value().buffer()->address() : 0,
             i,
-            local_batch_start,
-            local_batch_end,
-            local_nh_start,
-            local_nh_end,
-            local_q_start,
-            local_q_end,
+            0u,  // local_batch_start (unused under global)
+            0u,  // local_batch_end
+            0u,  // local_nh_start
+            0u,  // local_nh_end
+            0u,  // local_q_start
+            0u,  // local_q_end
             num_phases,
             chunked_q_chunk_offset,
             read_offset  // read_offset
@@ -1456,48 +1365,41 @@ SDPAProgramFactory::cached_program_t SDPAProgramFactory::create(
             reader_args.push_back(chain.mcast_sender_wait);
         }
 
-        // Global Q scheduling runtime args appended last (consumed only when SDPA_GLOBAL_Q_SCHED is set).
-        if (global_q_scheduling) {
-            reader_args.push_back(global_q_start);
-            reader_args.push_back(global_q_count);
-        }
+        reader_args.push_back(global_q_start);
+        reader_args.push_back(global_q_count);
 
         SetRuntimeArgs(program, reader_kernels_id, core, reader_args);
         std::vector<uint32_t> writer_args = {
             out_addr,
             i,
-            local_batch_start,
-            local_batch_end,
-            local_nh_start,
-            local_nh_end,
-            local_q_start,
-            local_q_end,
+            0u,  // local_batch_start (unused under global)
+            0u,  // local_batch_end
+            0u,  // local_nh_start
+            0u,  // local_nh_end
+            0u,  // local_q_start
+            0u,  // local_q_end
             num_phases,
             static_cast<uint32_t>(flexible_chunked ? 1 : 0),
             chunked_q_chunk_offset,
             write_offset,  // write_offset
+            global_q_start,
+            global_q_count,
         };
-        if (global_q_scheduling) {
-            writer_args.push_back(global_q_start);
-            writer_args.push_back(global_q_count);
-        }
         SetRuntimeArgs(program, writer_kernels_id, core, writer_args);
         std::vector<uint32_t> compute_args = {
             i,
-            local_batch_start,
-            local_batch_end,
-            local_nh_start,
-            local_nh_end,
-            local_q_start,
-            local_q_end,
+            0u,  // local_batch_start (unused under global)
+            0u,  // local_batch_end
+            0u,  // local_nh_start
+            0u,  // local_nh_end
+            0u,  // local_q_start
+            0u,  // local_q_end
             num_phases,
             static_cast<uint32_t>(flexible_chunked ? 1 : 0),
             chunked_q_chunk_offset,
+            global_q_start,
+            global_q_count,
         };
-        if (global_q_scheduling) {
-            compute_args.push_back(global_q_start);
-            compute_args.push_back(global_q_count);
-        }
         SetRuntimeArgs(program, compute_kernels_id, core, compute_args);
     }
 
