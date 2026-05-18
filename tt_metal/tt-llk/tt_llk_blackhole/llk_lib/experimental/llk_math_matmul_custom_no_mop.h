@@ -372,6 +372,8 @@ inline void _llk_math_matmul_no_mop_(std::uint32_t dst_index, const std::uint32_
         for (std::uint32_t rut = 0; rut < rut_dim; rut++)
         {
             math::set_dst_write_addr<DstTileShape::Tile32x32, UnpackDestination::SrcRegs>(dst_index + (reuse_a ? ct_dim * t + rut : t + rut * ct_dim));
+            // Direct replay can otherwise observe stale DEST immediately after packer-side ZEROACC.
+            mop_sync();
 
             if constexpr (THROTTLE_LEVEL > 0)
             {

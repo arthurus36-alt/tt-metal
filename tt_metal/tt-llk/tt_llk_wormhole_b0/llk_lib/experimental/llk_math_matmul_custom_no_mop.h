@@ -172,6 +172,9 @@ inline void matmul_load_replay_no_mop(const std::uint32_t ct_dim, const std::uin
 template <MathFidelity math_fidelity>
 inline void matmul_execute_replay_no_mop(const std::uint32_t replay_buf_len, const bool reuse_a, const std::uint32_t t_dim)
 {
+    // Direct replay can otherwise observe stale DEST immediately after packer-side ZEROACC.
+    mop_sync();
+
     if constexpr (!is_high_fidelity(math_fidelity))
     {
         lltt::replay(ckernel::math::replay_buf_offset, replay_buf_len);
