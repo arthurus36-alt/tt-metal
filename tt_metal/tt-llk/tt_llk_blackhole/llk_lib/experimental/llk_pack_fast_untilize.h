@@ -62,6 +62,10 @@
 #define FAST_UNTILIZE_STRIDED_CH1_ROW_ADVANCE 1
 #endif
 
+#ifndef FAST_UNTILIZE_STRIDED_DEST_REUSE
+#define FAST_UNTILIZE_STRIDED_DEST_REUSE 1
+#endif
+
 namespace ckernel
 {
 
@@ -76,6 +80,13 @@ template <std::uint32_t block_ct_dim, std::uint32_t full_ct_dim>
 constexpr bool _llk_pack_fast_untilize_use_ch1_row_advance_()
 {
     return FAST_UNTILIZE_STRIDED_MOP_REPLAY && FAST_UNTILIZE_STRIDED_CH1_ROW_ADVANCE && full_ct_dim > block_ct_dim;
+}
+
+template <std::uint32_t block_ct_dim, std::uint32_t full_ct_dim>
+constexpr bool _llk_pack_fast_untilize_reuse_strided_dest_()
+{
+    return _llk_pack_fast_untilize_use_ch1_row_advance_<block_ct_dim, full_ct_dim>() && FAST_UNTILIZE_STRIDED_DEST_REUSE && (full_ct_dim % block_ct_dim == 0) &&
+           (full_ct_dim >= 4 * block_ct_dim);
 }
 
 template <bool row_advance_via_ch1 = false>
@@ -168,6 +179,12 @@ inline void _llk_pack_fast_untilize_load_row_advance_replay_()
             TTI_CFGSHIFTMASK(1, 0b011, 32 - 1, 0, 0b11, THCON_SEC0_REG1_L1_Dest_addr_ADDR32);
             TTI_NOP;
         });
+}
+
+inline void _llk_pack_fast_untilize_advance_output_chunk_()
+{
+    TTI_CFGSHIFTMASK(1, 0b011, 32 - 1, 0, 0b11, THCON_SEC0_REG1_L1_Dest_addr_ADDR32);
+    TTI_NOP;
 }
 
 template <bool row_advance_via_ch1 = false>
@@ -296,6 +313,22 @@ inline void _llk_pack_fast_untilize_program_output_row_stride_(const std::uint32
     TTI_NOP;
 }
 
+inline void _llk_pack_fast_untilize_program_output_row_and_chunk_strides_(
+    const std::uint32_t output_row_stride_bytes, const std::uint32_t output_chunk_stride_16B)
+{
+    TT_SETDMAREG(0, LOWER_HALFWORD(output_row_stride_bytes << PCK0_ADDR_CTRL_XY_REG_1_Ystride_SHAMT), 0, LO_16(p_gpr_pack::TMP0));
+    TT_SETDMAREG(0, UPPER_HALFWORD(output_row_stride_bytes << PCK0_ADDR_CTRL_XY_REG_1_Ystride_SHAMT), 0, HI_16(p_gpr_pack::TMP0));
+    TT_SETDMAREG(0, 0, 0, LO_16(p_gpr_pack::TMP1));
+    TT_SETDMAREG(0, 0, 0, HI_16(p_gpr_pack::TMP1));
+    TT_SETDMAREG(0, LOWER_HALFWORD(output_chunk_stride_16B), 0, LO_16(p_gpr_pack::OUTPUT_ADDR_OFFSET));
+    TT_SETDMAREG(0, UPPER_HALFWORD(output_chunk_stride_16B), 0, HI_16(p_gpr_pack::OUTPUT_ADDR_OFFSET));
+    TTI_STALLWAIT(p_stall::STALL_CFG, p_stall::THCON);
+    TTI_WRCFG(p_gpr_pack::TMP0, p_cfg::WRCFG_32b, PCK0_ADDR_CTRL_XY_REG_1_Xstride_ADDR32);
+    TTI_WRCFG(p_gpr_pack::TMP1, p_cfg::WRCFG_32b, PCK0_ADDR_BASE_REG_1_Base_ADDR32);
+    TTI_WRCFG(p_gpr_pack::OUTPUT_ADDR_OFFSET, 0, SCRATCH_SEC2_val_ADDR32);
+    TTI_NOP;
+}
+
 inline void _llk_pack_fast_untilize_clear_output_row_stride_()
 {
     TT_SETDMAREG(0, 0, 0, LO_16(p_gpr_pack::TMP0));
@@ -343,9 +376,18 @@ inline void _llk_pack_fast_untilize_init_(const std::uint32_t pack_src_format, c
     {
         const std::uint32_t output_row_stride = SCALE_DATUM_SIZE(pack_dst_format, full_ct_dim * TILE_C_DIM);
         const std::uint32_t output_row_stride_16B = output_row_stride / 16;
+        constexpr bool reuse_strided_dest         = _llk_pack_fast_untilize_reuse_strided_dest_<block_ct_dim, full_ct_dim>();
         if constexpr (row_advance_via_ch1)
         {
-            _llk_pack_fast_untilize_program_output_row_stride_(output_row_stride);
+            if constexpr (reuse_strided_dest)
+            {
+                const std::uint32_t output_chunk_stride_16B = SCALE_DATUM_SIZE(pack_dst_format, block_ct_dim * TILE_C_DIM) / 16;
+                _llk_pack_fast_untilize_program_output_row_and_chunk_strides_(output_row_stride, output_chunk_stride_16B);
+            }
+            else
+            {
+                _llk_pack_fast_untilize_program_output_row_stride_(output_row_stride);
+            }
         }
         else
         {
@@ -494,6 +536,42 @@ inline void _llk_pack_fast_untilize_block_strided_(
     TTI_STALLWAIT(p_stall::STALL_CFG, p_stall::PACK);
     _llk_pack_fast_untilize_restore_pack_counters_();
 #endif
+}
+
+inline void _llk_pack_fast_untilize_strided_row_begin_(const std::uint32_t address)
+{
+    program_packer_destination(address);
+}
+
+// One call processes the current chunk in a wider row. The caller must first
+// program the row base with `_llk_pack_fast_untilize_strided_row_begin_`.
+template <std::uint32_t block_ct_dim = 4, std::uint32_t full_ct_dim = block_ct_dim, DstSync Dst = DstSync::SyncHalf>
+inline void _llk_pack_fast_untilize_block_strided_current_(
+    const std::uint32_t unit_dim, [[maybe_unused]] std::uint32_t& prev_unit_dim, const std::uint32_t num_faces = 4)
+{
+    static_assert(block_ct_dim >= 2 && block_ct_dim <= 4, "T5-B fast untilize strided path supports block_ct_dim 2, 3, or 4");
+    static_assert(_llk_pack_fast_untilize_reuse_strided_dest_<block_ct_dim, full_ct_dim>(), "Use only when strided destination reuse is enabled");
+    LLK_ASSERT(unit_dim == block_ct_dim, "fast_untilize reused strided destination requires uniform full-width chunks");
+    LLK_ASSERT(num_faces == 4, "fast_untilize pack only supports four-face tiles");
+
+    constexpr bool row_advance_via_ch1 = true;
+
+    if (unit_dim != prev_unit_dim)
+    {
+        _llk_pack_fast_untilize_strided_mop_config_<row_advance_via_ch1>(unit_dim);
+        prev_unit_dim = unit_dim;
+    }
+
+    _llk_pack_fast_untilize_reset_output_row_counter_();
+
+    _llk_pack_fast_untilize_select_phase_<Dst, 128>();
+    _llk_pack_fast_untilize_reset_src_counters_();
+    ckernel_template::run();
+
+    _llk_pack_fast_untilize_select_phase_<Dst, 0>();
+    _llk_pack_fast_untilize_reset_src_counters_();
+    ckernel_template::run();
+    _llk_pack_fast_untilize_restore_pack_counters_<row_advance_via_ch1>();
 }
 
 template <DstSync Dst, bool is_fp32_dest_acc_en, std::uint32_t block_ct_dim = 4, std::uint32_t full_ct_dim = block_ct_dim>

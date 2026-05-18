@@ -57,6 +57,21 @@ inline void llk_pack_fast_untilize_block_strided_at_address(
         address, unit_dim, prev_unit_dim, num_faces);
 }
 
+inline void llk_pack_fast_untilize_strided_row_begin_at_address(const std::uint32_t address) {
+    ckernel::_llk_pack_fast_untilize_strided_row_begin_(address);
+}
+
+inline void llk_pack_fast_untilize_advance_strided_row_address() {
+    ckernel::_llk_pack_fast_untilize_advance_output_chunk_();
+}
+
+template <std::uint32_t block_ct_dim = 4, std::uint32_t full_ct_dim = block_ct_dim, DstSync Dst = DstSync::SyncHalf>
+inline void llk_pack_fast_untilize_block_strided_current(
+    const std::uint32_t unit_dim, std::uint32_t& prev_unit_dim, const std::uint32_t num_faces = 4) {
+    ckernel::_llk_pack_fast_untilize_block_strided_current_<block_ct_dim, full_ct_dim, Dst>(
+        unit_dim, prev_unit_dim, num_faces);
+}
+
 template <
     DstSync Dst,
     bool is_fp32_dest_acc_en,

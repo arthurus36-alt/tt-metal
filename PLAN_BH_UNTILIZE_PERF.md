@@ -1217,9 +1217,69 @@ Conclusion:
 Next perf ideas, in preferred order:
 1. Profile remaining neutral/low-win shapes (`ct=8/12/16`, dest-acc fp32) to see
    whether output-counter advancement is no longer the dominant cost.
-2. Try destination-programming hoist/reuse across repeated same-width chunks,
-   with guard-sentinel correctness first.
+2. Destination-programming hoist/reuse across repeated same-width chunks:
+   attempted and kept only for rows with at least four equal chunks. See the
+   2026-05-18 destination-reuse note below.
 3. Revisit strided MOP compression only with ttsim counter visibility and a
    long-loop pack-isolate gate; prior MOP liveness issues were silicon-only.
 4. Treat `unit_dim=1` tails as functionally possible but not profitable unless a
    different pack MOP can avoid the `ct=9` regression.
+
+### 2026-05-18 strided destination reuse
+
+Goal: reduce repeated `program_packer_destination(address)` overhead for wide
+rows that decompose into same-width chunks. The experiment programs the row base
+once, uses one `CFGSHIFTMASK` to advance `THCON_SEC0_REG1_L1_Dest_addr` between
+chunks, and runs the strided pack MOP at the current destination address.
+
+Finding:
+- Enabling this for all exact multiples (`ct=8/12/16`) gave a repeatable
+  steady-state full-pipeline win, but cold `loop_factor=1` PACK_ISOLATE had
+  >2% regressions for `ct=8/12`.
+- Combining the row-stride and chunk-stride init writes under one `STALLWAIT`
+  reduced init overhead but did not fully remove those cold pack regressions.
+- Safe default gate is therefore exact multiples with at least four chunks:
+  `full_ct_dim % block_ct_dim == 0 && full_ct_dim >= 4 * block_ct_dim`.
+  In the current matrix that enables `ct=16` and leaves `ct=8/12` on the
+  existing per-chunk destination path.
+
+Kept implementation:
+- Add `FAST_UNTILIZE_STRIDED_DEST_REUSE`, default enabled, behind the ch1
+  row-advance path.
+- Add row-scoped pack helpers:
+  `llk_pack_fast_untilize_strided_row_begin_at_address`,
+  `llk_pack_fast_untilize_block_strided_current`, and
+  `llk_pack_fast_untilize_advance_strided_row_address`.
+- Program row stride and chunk stride together when the gated path is active;
+  the old per-chunk destination path remains the fallback for `ct=8/12` and
+  non-exact decompositions.
+
+Validation:
+- Full LLK correctness:
+  `python_env/bin/python3 -m pytest -q --tb=short -o log_cli=false tt_metal/tt-llk/tests/python_tests/test_fast_untilize.py`
+  -> `2160 passed in 399.75s`.
+- Wide perf gate:
+  `python_env/bin/python3 -m pytest -q --tb=short -o log_cli=false tt_metal/tt-llk/tests/python_tests/perf_fast_untilize.py -k 'loop_factor:16 and (ct_dim:5 or ct_dim:6 or ct_dim:7 or ct_dim:8 or ct_dim:9 or ct_dim:12 or ct_dim:16)'`
+  -> `378 passed, 1242 deselected in 400.92s`.
+- Focused cold/steady A/B against `FAST_UNTILIZE_STRIDED_DEST_REUSE=0` covered
+  `ct=8/12/16`, `loop_factor=1/16`, all supported formats, `SyncHalf`/`SyncFull`,
+  and dest 16/32 modes.
+
+Matched perf result for the accepted gate:
+
+| scope | marker | run type | min delta | mean delta | max delta | regressions >2% |
+|:---|:---|:---|---:|---:|---:|---:|
+| `ct=8/12/16`, `loop_factor=1` | KERNEL | `L1_TO_L1` | `-2.44%` | `-0.40%` | `+0.40%` | 0 |
+| `ct=8/12/16`, `loop_factor=1` | KERNEL | `PACK_ISOLATE` | `-0.36%` | `+0.21%` | `+1.88%` | 0 |
+| `ct=8/12/16`, `loop_factor=16` | KERNEL | `L1_TO_L1` | `-3.09%` | `-0.61%` | `+0.04%` | 0 |
+| `ct=8/12/16`, `loop_factor=16` | KERNEL | `PACK_ISOLATE` | `-0.74%` | `-0.05%` | `+0.25%` | 0 |
+| `ct=8/12/16`, `loop_factor=16` | TILE_LOOP | `L1_TO_L1` | `-3.13%` | `-0.62%` | `+0.03%` | 0 |
+| `ct=8/12/16`, `loop_factor=16` | TILE_LOOP | `PACK_ISOLATE` | `-0.78%` | `-0.07%` | `+0.14%` | 0 |
+
+By `ct`, KERNEL `loop_factor=16` deltas:
+
+| `ct` | `L1_TO_L1` mean | `PACK_ISOLATE` mean | regressions >2% |
+|---:|---:|---:|---:|
+| 8 | `0.00%` | `0.00%` | 0 |
+| 12 | `-0.00%` | `0.00%` | 0 |
+| 16 | `-1.82%` | `-0.17%` | 0 |

@@ -274,6 +274,18 @@ void run_kernel(RUNTIME_PARAMETERS params)
                     {
                         llk_pack_fast_untilize_block_at_address<FAST_UNTILIZE_MAX_UNIT_DIM, dest_sync>(chunk_address, unit_dim, prev_pack_unit_dim);
                     }
+                    else if constexpr (_llk_pack_fast_untilize_reuse_strided_dest_<FAST_UNTILIZE_MAX_UNIT_DIM, FULL_CT_DIM>())
+                    {
+                        if (u == 0)
+                        {
+                            llk_pack_fast_untilize_strided_row_begin_at_address(chunk_address);
+                        }
+                        llk_pack_fast_untilize_block_strided_current<FAST_UNTILIZE_MAX_UNIT_DIM, FULL_CT_DIM, dest_sync>(unit_dim, prev_pack_unit_dim);
+                        if (u + 1 < units_per_row)
+                        {
+                            llk_pack_fast_untilize_advance_strided_row_address();
+                        }
+                    }
                     else
                     {
                         llk_pack_fast_untilize_block_strided_at_address<FAST_UNTILIZE_MAX_UNIT_DIM, FULL_CT_DIM, dest_sync>(
