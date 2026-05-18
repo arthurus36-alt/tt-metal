@@ -202,18 +202,7 @@ K_CHUNK_SIZES = [128, 256, 512]
 )
 def test_sdpa_sweep_perf_impl(device, b, nh, s, d, q_chunk_size, k_chunk_size, dtype):
     # nkv = nh for non-GQA case
-    run_sdpa_noncausal(
-        device,
-        b,
-        nh,
-        nh,
-        s,
-        d,
-        q_chunk_size,
-        k_chunk_size,
-        dtype,
-        do_check=False,
-    )
+    run_sdpa_noncausal(device, b, nh, nh, s, d, q_chunk_size, k_chunk_size, dtype, do_check=False)
 
 
 # === TEST 2: ACCURACY VERIFICATION ===
@@ -304,6 +293,7 @@ def test_sdpa_create_perf_table(b, nh, s, d):
         float_cols = ["CORE COUNT", "DEVICE KERNEL DURATION [ns]"]
         cols = ["ATTRIBUTES"]
 
+        # Build the test command for this specific configuration
         test_id = f"k{k_chunk_size}-q{q_chunk_size}-bf16"
         shape_id = INPUT_IDS[INPUT_SHAPES.index([b, nh, s, d])]
         command = (
