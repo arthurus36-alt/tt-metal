@@ -1370,6 +1370,9 @@ Perf result at `rt=4`, `ct=8`, `loop_factor=16`:
 Wider `rt=4`, all-ct comparison: `162` matched rows, worst L1 delta `+0.02%`,
 no regressions above `2%`, and best FullSync wins up to `~37%`.
 
+Detailed CT x RT cost tables for each data type / output / dest size /
+dest mode variant are in `BH_FAST_UNTILIZE_CT_RT_COST_TABLES.md`.
+
 Conclusion:
 - Keep internal HalfSync as the default fast-untilize implementation.
 - FullSync was an avoidable single-buffering cost for this private <=4-tile
