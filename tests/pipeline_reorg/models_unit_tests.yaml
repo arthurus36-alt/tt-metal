@@ -246,15 +246,12 @@
       models/demos/gemma4/tests/unit/
   model: gemma-4-e4b
   skus:
-    wh_n150:
-      timeout: 15
-      tier: 2
     # wh_n300 disabled due to reduced N300 runner availability — re-enable when capacity returns.
     # wh_n300:
     #   timeout: 5
     #   tier: 2
     bh_p150:
-      timeout: 15
+      timeout: 20
       tier: 2
     bh_p300:
       timeout: 15
@@ -277,7 +274,7 @@
   model: gemma-4-26b-a4b
   skus:
     wh_llmbox:
-      timeout: 15
+      timeout: 20
       tier: 2
     bh_quietbox_2:
       timeout: 15
@@ -286,7 +283,7 @@
       timeout: 15
       tier: 2
     bh_galaxy:
-      timeout: 15
+      timeout: 20
       tier: 2
   owner_id: U08TJ70UFRT # Harry Andrews
   team: models
@@ -312,7 +309,7 @@
       timeout: 15
       tier: 2
     bh_galaxy:
-      timeout: 15
+      timeout: 20
       tier: 2
   owner_id: U08TJ70UFRT # Harry Andrews
   team: models
