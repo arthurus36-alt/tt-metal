@@ -254,18 +254,8 @@ def run_generation(
         # only.
         import traceback as tb
 
-        tokens_tt = ttnn.from_torch(
-            input_ids_padded.unsqueeze(0).to(torch.int32),
-            device=mesh_device,
-            layout=ttnn.ROW_MAJOR_LAYOUT,
-            dtype=ttnn.uint32,
-            mesh_mapper=replicate,
-        )
-        embeds = model.embed_tokens(tokens_tt)
-        embeds = ttnn.reshape(embeds, (1, 1, padded_len, model_args.hidden_size))
-        embeds = ttnn.to_layout(embeds, ttnn.TILE_LAYOUT)
-
-        # CPU tensors for per-layer input computation (E2B/E4B)
+        # CPU tensors for per-layer input computation (E2B/E4B) — reusable
+        # across both prefill calls below.
         import torch.nn.functional as F
 
         embeds_torch = (
@@ -282,12 +272,35 @@ def run_generation(
         # Get last token tile for first decode token
         get_last_token = ((prompt_len - 1) // 32) * 32
 
+        def _build_prefill_embeds():
+            """Build a fresh ttnn embeds tensor for ttnn_prefill_forward.
+
+            The model deallocates intermediate hidden_states tensors as it
+            walks layers (memory pressure on long prompts), which frees the
+            input embeds buffer too. Rebuild before each prefill call so the
+            warmup pass and the measured pass each see a live tensor.
+            Pattern matches tt_transformers' generator.prefill_forward_text,
+            which receives torch tokens and re-tokenizes/re-embeds internally
+            each call.
+            """
+            tokens_tt = ttnn.from_torch(
+                input_ids_padded.unsqueeze(0).to(torch.int32),
+                device=mesh_device,
+                layout=ttnn.ROW_MAJOR_LAYOUT,
+                dtype=ttnn.uint32,
+                mesh_mapper=replicate,
+            )
+            e = model.embed_tokens(tokens_tt)
+            e = ttnn.reshape(e, (1, 1, padded_len, model_args.hidden_size))
+            return ttnn.to_layout(e, ttnn.TILE_LAYOUT)
+
         # ── Warmup prefill (compile cost, untimed for TTFT) ─────────────
         logger.info("Prefill warmup (compiling)...")
         profiler.start(f"compile_prefill", iteration=prompt_idx)
         try:
+            warmup_embeds = _build_prefill_embeds()
             warmup_logits = model.ttnn_prefill_forward(
-                embeds,
+                warmup_embeds,
                 page_table=page_table_tt,
                 kv_cache=tt_kv_cache,
                 get_last_token=get_last_token,
@@ -306,6 +319,7 @@ def run_generation(
         logger.info("Prefilling (measured)...")
         profiler.start(f"inference_prefill", iteration=prompt_idx)
         try:
+            embeds = _build_prefill_embeds()
             logits = model.ttnn_prefill_forward(
                 embeds,
                 page_table=page_table_tt,
