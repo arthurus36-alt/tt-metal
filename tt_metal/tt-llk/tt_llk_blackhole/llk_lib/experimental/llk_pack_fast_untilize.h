@@ -392,13 +392,13 @@ inline void _llk_pack_fast_untilize_block_strided_(
     _llk_pack_fast_untilize_select_phase_<Dst, 128>();
     _llk_pack_fast_untilize_reset_src_counters_();
     ckernel_template::run();
-    TTI_STALLWAIT(p_stall::STALL_CFG, p_stall::PACK);
 
-    // After 16 row-stride end-ops the destination is already at output row 16.
+    // The row-close replay has already advanced L1_Dest_addr to output row 16.
+    // Phase selection and counter restore are consumed by later PACRs, matching
+    // the contiguous path's no-wait sequence.
     _llk_pack_fast_untilize_select_phase_<Dst, 0>();
     _llk_pack_fast_untilize_reset_src_counters_();
     ckernel_template::run();
-    TTI_STALLWAIT(p_stall::STALL_CFG, p_stall::PACK);
     _llk_pack_fast_untilize_restore_pack_counters_();
 #else
     // Phase 1 emits rows 0..15. Each row is closed and L1_Dest_addr is advanced

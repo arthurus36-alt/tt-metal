@@ -1076,3 +1076,68 @@ Validation after the fix:
 - Focused LLK coverage: `test_fast_untilize.py -k 'Float16_b and Half'` -> `720 passed, 1440 deselected`, including ct=2, BFP inputs, random/row-id stimuli, and overflow guards.
 - Exact Full-sync ct=2 smoke: 4 selected direct/guard cases passed.
 - Focused perf (`Float16_b->Float16_b`, `rt=1`, `ct=2`, SyncHalf, `loop_factor=16`, dest_acc=No): current fast KERNEL `L1_TO_L1=2371.5`, `PACK_ISOLATE=1840.0`; prior fast baseline was `2339.0` / `1824.0` (`~+1-2%`); legacy is `4743.0` / `4400.0`, so the fast path keeps the large win.
+
+### 2026-05-17 wide-row MOP sequencing autonomous pass
+
+Goal: continue the high-risk MOP optimization backlog in a test-driven way, keeping only changes with focused correctness plus matched perf evidence.
+
+Candidate list and outcomes:
+
+| idea | target | outcome |
+|:---|:---|:---|
+| Shape-gated ch1 output counters | aligned wide-row output strides | Rejected. Correctness failed for `ct=8/12/16` with row-layout corruption; needs output address generator debug before retry. |
+| `ct=5` decomposition `3+2` instead of `2+3` | odd wide rows | Rejected. Correctness passed, perf was effectively unchanged. |
+| Multi-tile BFP unpack MOP | BFP inputs | Rejected. Correctness passed for focused cases, perf was unchanged. |
+| Row-advance replay length 1 / remove replay NOP | strided row close | Rejected. Correctness failed; the NOP is required before the next PACR observes the shifted address. |
+| Preconfigure strided MOP in init for `ct % 4 == 0` | `ct=8/12/16` | Rejected. Correctness passed, perf was neutral/slightly worse. |
+| Hoist BFP format check out of unpack loop | BFP inputs | Rejected as non-perf cleanup. Correctness passed, perf was noise. |
+| Direct row fallback instead of replay | wide rows | Rejected. Correctness passed but perf regressed (`L1_TO_L1` about `+6.9%`, `PACK_ISOLATE` about `+1.8%`). |
+| Hoist pack output address calculation | strided chunks | Rejected. Correctness passed, perf was unchanged. |
+| Remove `mop_sync()` from phase-close MOP patch | contiguous path | Rejected. Correctness failed for `ct=2/4`; phase-1 read bottom rows. |
+| Add `unit_dim=1` tail support | `ct=5/9` tails | Rejected. Correctness passed, `ct=5` was marginal, `ct=9` regressed. |
+| Remove phase-1 strided `STALLWAIT` | wide strided MOP/replay | Kept. Correctness passed and matched perf shows a consistent wide-row pack win. |
+| Remove final strided `STALLWAIT` | wide strided MOP/replay restore boundary | Kept. Full correctness passed and matched perf shows another pack win with no KERNEL/TILE_LOOP regressions over 2%. |
+
+Kept changes:
+- In `_llk_pack_fast_untilize_block_strided_`, remove the `TTI_STALLWAIT(p_stall::STALL_CFG, p_stall::PACK)` between the top and bottom strided MOP phases.
+- In the same strided MOP/replay path, remove the final `TTI_STALLWAIT(p_stall::STALL_CFG, p_stall::PACK)` before restoring standard pack counters.
+- Rationale: phase 1 emits 16 row-close end-ops, so `L1_Dest_addr` is already advanced to output row 16 before phase 2. Phase selection, source-counter reset, and final counter restore configure subsequent PACRs and match the contiguous fast path's no-wait sequencing. The direct non-replay fallback keeps its explicit `STALLWAIT`s.
+
+Matched perf gate:
+- Baseline CSV: `/tmp/fast_untilize_phase1_stall_wide_allformats_baseline.post.csv`
+- Phase-1-only candidate CSV: `/tmp/fast_untilize_no_phase1_stall_wide_allformats_candidate.post.csv`
+- Final candidate CSV: `/tmp/fast_untilize_no_final_stall_wide_allformats_candidate.post.csv`
+- Command: `python_env/bin/python3 -m pytest -q --tb=short tt_metal/tt-llk/tests/python_tests/perf_fast_untilize.py -k 'loop_factor:16 and (ct_dim:5 or ct_dim:6 or ct_dim:7 or ct_dim:8 or ct_dim:9 or ct_dim:12 or ct_dim:16)'`
+- Baseline: `378 passed, 1242 deselected in 397.81s`.
+- Phase-1-only candidate: `378 passed, 1242 deselected in 397.93s`.
+- Final candidate: `378 passed, 1242 deselected in 399.47s`.
+
+Matched perf result for final candidate vs original two-stall baseline, over 378 KERNEL variants (`ct=5/6/7/8/9/12/16`, `rt=1/2/4`, all supported formats, `SyncHalf`/`SyncFull`, dest 16/32 as applicable):
+
+| marker | run type | min delta | mean delta | max delta | regressions >2% | wins >2% |
+|:---|:---|---:|---:|---:|---:|---:|
+| KERNEL | `L1_TO_L1` | `-12.62%` | `-8.17%` | `-0.03%` | 0 | 354 |
+| KERNEL | `PACK_ISOLATE` | `-26.45%` | `-17.91%` | `-8.61%` | 0 | 378 |
+| KERNEL | `UNPACK_ISOLATE` | `-0.16%` | `0.00%` | `+0.09%` | 0 | 0 |
+| KERNEL | `MATH_ISOLATE` | `-0.08%` | `0.00%` | `+0.11%` | 0 | 0 |
+| TILE_LOOP | `L1_TO_L1` | `-12.89%` | `-8.45%` | `-0.03%` | 0 | 354 |
+| TILE_LOOP | `PACK_ISOLATE` | `-26.77%` | `-18.52%` | `-8.94%` | 0 | 378 |
+
+Incremental effect of removing the final strided `STALLWAIT`, measured against the phase-1-only candidate:
+
+| marker | run type | min delta | mean delta | max delta | regressions >2% | wins >2% |
+|:---|:---|---:|---:|---:|---:|---:|
+| KERNEL | `L1_TO_L1` | `-1.62%` | `-0.72%` | `+0.05%` | 0 | 0 |
+| KERNEL | `PACK_ISOLATE` | `-16.86%` | `-8.96%` | `+0.07%` | 0 | 310 |
+| TILE_LOOP | `L1_TO_L1` | `-1.64%` | `-0.75%` | `0.00%` | 0 | 0 |
+| TILE_LOOP | `PACK_ISOLATE` | `-17.08%` | `-9.28%` | `+0.01%` | 0 | 311 |
+
+Correctness gate:
+- `python_env/bin/python3 -m pytest -q --tb=short tt_metal/tt-llk/tests/python_tests/test_fast_untilize.py`
+- Result after both kept changes: `2160 passed in 404.68s`, including row-id/random stimuli, `SyncHalf`/`SyncFull`, supported format matrix, and overflow guard sentinels.
+
+Next perf ideas, in preferred order:
+1. Retry ch1 output counters only after confirming the output-address-generator register selection; prior attempts corrupt layout.
+2. Revisit row-close address update alternatives (`RMWCIB`/manual cfg patch) with a kill switch; config ordering is the main risk.
+3. Treat `unit_dim=1` tails as functionally possible but not profitable unless a different pack MOP can avoid the `ct=9` regression.
+4. If more pack wins are needed, profile per-shape chunks to find cases where the replay MOP still has excess instruction bubbles; most obvious generic wait removal is now exhausted.
