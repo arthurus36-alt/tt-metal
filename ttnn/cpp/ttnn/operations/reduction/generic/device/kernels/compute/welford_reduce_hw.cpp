@@ -23,10 +23,11 @@
 #include "experimental/dataflow_buffer.h"
 
 void kernel_main() {
-    // Runtime arg: total NC slices this core must process.
-    const uint32_t NC_per_core = get_arg(args::NC_per_core);
-
-    // Compile-time args.
+    // Compile-time args. `NC_per_core` (total NC slices this core processes) is
+    // per-group: when split_work_to_cores produces two work groups, the host emits
+    // two KernelSpecs of this source with each group's NC_per_core bound as a CTA,
+    // preserving compile-time outer-loop unrolling.
+    constexpr uint32_t NC_per_core = get_arg(args::NC_per_core);
     constexpr uint32_t Ht = get_arg(args::Ht);
     constexpr uint32_t H = get_arg(args::H);
     constexpr uint32_t tile_height = get_arg(args::tile_height);
@@ -66,7 +67,7 @@ void kernel_main() {
         dfb_scaler.wait_front(onetile);
     }
 
-    uint32_t num_outputs = NC_per_core / reduce_batch_size;
+    constexpr uint32_t num_outputs = NC_per_core / reduce_batch_size;
 
     for (uint32_t out = 0; out < num_outputs; ++out) {
         // Phase 1: H-reduce all columns for reduce_batch_size NC slices.

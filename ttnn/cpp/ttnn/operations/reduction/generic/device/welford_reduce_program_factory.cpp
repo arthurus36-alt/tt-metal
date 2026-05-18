@@ -45,10 +45,16 @@ namespace m2 = tt::tt_metal::experimental::metal2_host_api;
 
 namespace {
 
+// split_work_to_cores can produce two work groups with different per-core
+// outer-loop counts (NCHt for W, NCWt for H, NC_per_core for HW). We materialize
+// one compute KernelSpec per non-empty group so the outer-loop count stays
+// compile-time. Reader/writer are common to both groups.
 constexpr const char* WELFORD_READER_KERNEL = "welford_reader";
 constexpr const char* WELFORD_WRITER_KERNEL = "welford_writer";
-constexpr const char* WELFORD_COMPUTE_KERNEL = "welford_compute";
-constexpr const char* WELFORD_WORK_UNIT = "all_workers";
+constexpr const char* WELFORD_COMPUTE_KERNEL_G1 = "welford_compute_g1";
+constexpr const char* WELFORD_COMPUTE_KERNEL_G2 = "welford_compute_g2";
+constexpr const char* WELFORD_WORK_UNIT_G1 = "workers_g1";
+constexpr const char* WELFORD_WORK_UNIT_G2 = "workers_g2";
 constexpr const char* WELFORD_INPUT_TENSOR = "input_tensor";
 constexpr const char* WELFORD_OUTPUT_TENSOR = "output_tensor";
 
@@ -145,8 +151,8 @@ m2::ProgramRunParams BuildRunParams(
     m2::ProgramRunParams::KernelRunParams writer_params;
     writer_params.kernel_spec_name = WELFORD_WRITER_KERNEL;
 
-    m2::ProgramRunParams::KernelRunParams compute_params;
-    compute_params.kernel_spec_name = WELFORD_COMPUTE_KERNEL;
+    // Compute kernels have no per-core RTAs (the outer-loop count is a CTA on each
+    // per-group KernelSpec), so they don't appear in kernel_run_params.
 
     const bool reduce_w = (shared.reduce_dim == ReduceOpDim::W);
     const bool reduce_hw = (shared.reduce_dim == ReduceOpDim::HW);
@@ -184,10 +190,6 @@ m2::ProgramRunParams BuildRunParams(
                         {"num_pages", num_output_tiles_per_core},
                         {"start_id", output_tiles_offset},
                     },
-            });
-            compute_params.named_runtime_args.push_back(m2::ProgramRunParams::KernelRunParams::NodeNamedRTAs{
-                .node = core,
-                .args = {{"NCHt", num_work_units_per_core}},
             });
 
             input_tiles_offset += num_input_tiles_per_core;
@@ -229,10 +231,6 @@ m2::ProgramRunParams BuildRunParams(
                         {"output_tile_start_id", output_offset},
                     },
             });
-            compute_params.named_runtime_args.push_back(m2::ProgramRunParams::KernelRunParams::NodeNamedRTAs{
-                .node = core,
-                .args = {{"NC_per_core", nc_slices_per_core}},
-            });
 
             nc_slice_offset += nc_slices_per_core;
             output_offset += num_outputs_per_core;
@@ -269,16 +267,12 @@ m2::ProgramRunParams BuildRunParams(
                         {"start_id", num_cols_read},
                     },
             });
-            compute_params.named_runtime_args.push_back(m2::ProgramRunParams::KernelRunParams::NodeNamedRTAs{
-                .node = core,
-                .args = {{"NCWt", num_cols_per_core}},
-            });
 
             num_cols_read += num_cols_per_core;
         }
     }
 
-    params.kernel_run_params = {std::move(reader_params), std::move(writer_params), std::move(compute_params)};
+    params.kernel_run_params = {std::move(reader_params), std::move(writer_params)};
     params.tensor_args = {
         m2::ProgramRunParams::TensorArg{.tensor_parameter_name = WELFORD_INPUT_TENSOR, .tensor = std::cref(input_mt)},
         m2::ProgramRunParams::TensorArg{.tensor_parameter_name = WELFORD_OUTPUT_TENSOR, .tensor = std::cref(output_mt)},
@@ -563,7 +557,12 @@ ttnn::device_operation::ProgramArtifacts WelfordReduceProgramFactory::create_pro
         m2::KernelSpec::TensorBinding{.tensor_parameter_name = WELFORD_OUTPUT_TENSOR, .accessor_name = "output_tensor"},
     };
 
-    // ---- Compute ----
+    // ---- Compute kernel(s) ----
+    // split_work_to_cores can produce two core groups with different per-core outer-loop
+    // counts (NCHt for W, NCWt for H, NC_per_core for HW). We materialize one compute
+    // KernelSpec per non-empty group, each with its group's per-core count bound as a
+    // CTA. The kernel sources take the outer-loop count as a compile-time argument,
+    // preserving compile-time loop unrolling.
     std::string compute_kernel_path;
     if (reduce_w) {
         compute_kernel_path = "ttnn/cpp/ttnn/operations/reduction/generic/device/kernels/compute/welford_reduce_w.cpp";
@@ -573,131 +572,159 @@ ttnn::device_operation::ProgramArtifacts WelfordReduceProgramFactory::create_pro
         compute_kernel_path = "ttnn/cpp/ttnn/operations/reduction/generic/device/kernels/compute/welford_reduce_hw.cpp";
     }
 
-    m2::KernelSpec compute;
-    compute.unique_id = WELFORD_COMPUTE_KERNEL;
-    compute.source = m2::KernelSpec::SourceFilePath{compute_kernel_path};
-    compute.compiler_options.defines = reduce_defines;
-    compute.config_spec = m2::ComputeConfiguration{
-        .math_fidelity = math_fidelity,
-        .fp32_dest_acc_en = fp32_dest_acc_en,
+    auto make_compute_kernel = [&](const char* unique_id, uint32_t outer_loop_count) {
+        m2::KernelSpec compute;
+        compute.unique_id = unique_id;
+        compute.source = m2::KernelSpec::SourceFilePath{compute_kernel_path};
+        compute.compiler_options.defines = reduce_defines;
+        compute.config_spec = m2::ComputeConfiguration{
+            .math_fidelity = math_fidelity,
+            .fp32_dest_acc_en = fp32_dest_acc_en,
+        };
+        if (reduce_w) {
+            compute.compile_time_arg_bindings = {
+                {"NCHt", outer_loop_count},
+                {"Wt", Wt},
+                {"W", W},
+                {"tile_width", tile_width},
+                {"do_scale", static_cast<uint32_t>(do_scale)},
+                {"correction", static_cast<uint32_t>(operation_attributes.correction)},
+                {"is_std", static_cast<uint32_t>(is_std)},
+            };
+        } else if (reduce_h) {
+            compute.compile_time_arg_bindings = {
+                {"NCWt", outer_loop_count},
+                {"Ht", Ht},
+                {"H", H},
+                {"tile_height", tile_height},
+                {"do_scale", static_cast<uint32_t>(do_scale)},
+                {"correction", static_cast<uint32_t>(operation_attributes.correction)},
+                {"is_std", static_cast<uint32_t>(is_std)},
+            };
+        } else {
+            compute.compile_time_arg_bindings = {
+                {"NC_per_core", outer_loop_count},
+                {"Ht", Ht},
+                {"H", H},
+                {"tile_height", tile_height},
+                {"Wt", Wt},
+                {"do_scale", static_cast<uint32_t>(do_scale)},
+                {"reduce_batch_size", reduce_batch_size},
+                {"is_std", static_cast<uint32_t>(is_std)},
+            };
+        }
+        // No runtime_arguments_schema — compute has no RTAs now.
+        compute.dfb_bindings = {
+            m2::KernelSpec::DFBBinding{
+                .dfb_spec_name = INPUT_DFB,
+                .local_accessor_name = "input",
+                .endpoint_type = m2::KernelSpec::DFBEndpointType::CONSUMER,
+                .access_pattern = m2::DFBAccessPattern::STRIDED,
+            },
+            m2::KernelSpec::DFBBinding{
+                .dfb_spec_name = SCALER_DFB,
+                .local_accessor_name = "scaler",
+                .endpoint_type = m2::KernelSpec::DFBEndpointType::CONSUMER,
+                .access_pattern = m2::DFBAccessPattern::STRIDED,
+            },
+            m2::KernelSpec::DFBBinding{
+                .dfb_spec_name = OUTPUT_DFB,
+                .local_accessor_name = "output",
+                .endpoint_type = m2::KernelSpec::DFBEndpointType::PRODUCER,
+                .access_pattern = m2::DFBAccessPattern::STRIDED,
+            },
+        };
+        if (reduce_w) {
+            // The var and scaled DFBs are produced AND consumed by this same kernel. Metal 2.0
+            // requires distinct local_accessor_names per binding even when both endpoints are
+            // the same kernel; on Gen1 the two accessor ids resolve to the same underlying CB.
+            compute.dfb_bindings.insert(
+                compute.dfb_bindings.end(),
+                {
+                    m2::KernelSpec::DFBBinding{
+                        .dfb_spec_name = VAR_DFB,
+                        .local_accessor_name = "var_w",
+                        .endpoint_type = m2::KernelSpec::DFBEndpointType::PRODUCER,
+                        .access_pattern = m2::DFBAccessPattern::STRIDED,
+                    },
+                    m2::KernelSpec::DFBBinding{
+                        .dfb_spec_name = VAR_DFB,
+                        .local_accessor_name = "var_r",
+                        .endpoint_type = m2::KernelSpec::DFBEndpointType::CONSUMER,
+                        .access_pattern = m2::DFBAccessPattern::STRIDED,
+                    },
+                    m2::KernelSpec::DFBBinding{
+                        .dfb_spec_name = SCALED_DFB,
+                        .local_accessor_name = "scaled_w",
+                        .endpoint_type = m2::KernelSpec::DFBEndpointType::PRODUCER,
+                        .access_pattern = m2::DFBAccessPattern::STRIDED,
+                    },
+                    m2::KernelSpec::DFBBinding{
+                        .dfb_spec_name = SCALED_DFB,
+                        .local_accessor_name = "scaled_r",
+                        .endpoint_type = m2::KernelSpec::DFBEndpointType::CONSUMER,
+                        .access_pattern = m2::DFBAccessPattern::STRIDED,
+                    },
+                });
+        }
+        if (reduce_hw) {
+            compute.dfb_bindings.insert(
+                compute.dfb_bindings.end(),
+                {
+                    m2::KernelSpec::DFBBinding{
+                        .dfb_spec_name = PARTIAL_DFB,
+                        .local_accessor_name = "partial",
+                        .endpoint_type = m2::KernelSpec::DFBEndpointType::PRODUCER,
+                        .access_pattern = m2::DFBAccessPattern::STRIDED,
+                    },
+                    m2::KernelSpec::DFBBinding{
+                        .dfb_spec_name = COMBINED_DFB,
+                        .local_accessor_name = "combined",
+                        .endpoint_type = m2::KernelSpec::DFBEndpointType::CONSUMER,
+                        .access_pattern = m2::DFBAccessPattern::STRIDED,
+                    },
+                });
+        }
+        return compute;
     };
-    if (reduce_w) {
-        compute.compile_time_arg_bindings = {
-            {"Wt", Wt},
-            {"W", W},
-            {"tile_width", tile_width},
-            {"do_scale", static_cast<uint32_t>(do_scale)},
-            {"correction", static_cast<uint32_t>(operation_attributes.correction)},
-            {"is_std", static_cast<uint32_t>(is_std)},
-        };
-        compute.runtime_arguments_schema.named_runtime_args = {"NCHt"};
-    } else if (reduce_h) {
-        compute.compile_time_arg_bindings = {
-            {"Ht", Ht},
-            {"H", H},
-            {"tile_height", tile_height},
-            {"do_scale", static_cast<uint32_t>(do_scale)},
-            {"correction", static_cast<uint32_t>(operation_attributes.correction)},
-            {"is_std", static_cast<uint32_t>(is_std)},
-        };
-        compute.runtime_arguments_schema.named_runtime_args = {"NCWt"};
-    } else {
-        compute.compile_time_arg_bindings = {
-            {"Ht", Ht},
-            {"H", H},
-            {"tile_height", tile_height},
-            {"Wt", Wt},
-            {"do_scale", static_cast<uint32_t>(do_scale)},
-            {"reduce_batch_size", reduce_batch_size},
-            {"is_std", static_cast<uint32_t>(is_std)},
-        };
-        compute.runtime_arguments_schema.named_runtime_args = {"NC_per_core"};
-    }
-    compute.dfb_bindings = {
-        m2::KernelSpec::DFBBinding{
-            .dfb_spec_name = INPUT_DFB,
-            .local_accessor_name = "input",
-            .endpoint_type = m2::KernelSpec::DFBEndpointType::CONSUMER,
-            .access_pattern = m2::DFBAccessPattern::STRIDED,
-        },
-        m2::KernelSpec::DFBBinding{
-            .dfb_spec_name = SCALER_DFB,
-            .local_accessor_name = "scaler",
-            .endpoint_type = m2::KernelSpec::DFBEndpointType::CONSUMER,
-            .access_pattern = m2::DFBAccessPattern::STRIDED,
-        },
-        m2::KernelSpec::DFBBinding{
-            .dfb_spec_name = OUTPUT_DFB,
-            .local_accessor_name = "output",
-            .endpoint_type = m2::KernelSpec::DFBEndpointType::PRODUCER,
-            .access_pattern = m2::DFBAccessPattern::STRIDED,
-        },
-    };
-    if (reduce_w) {
-        compute.dfb_bindings.insert(
-            compute.dfb_bindings.end(),
-            {
-                m2::KernelSpec::DFBBinding{
-                    .dfb_spec_name = VAR_DFB,
-                    .local_accessor_name = "var_w",
-                    .endpoint_type = m2::KernelSpec::DFBEndpointType::PRODUCER,
-                    .access_pattern = m2::DFBAccessPattern::STRIDED,
-                },
-                m2::KernelSpec::DFBBinding{
-                    .dfb_spec_name = VAR_DFB,
-                    .local_accessor_name = "var_r",
-                    .endpoint_type = m2::KernelSpec::DFBEndpointType::CONSUMER,
-                    .access_pattern = m2::DFBAccessPattern::STRIDED,
-                },
-                m2::KernelSpec::DFBBinding{
-                    .dfb_spec_name = SCALED_DFB,
-                    .local_accessor_name = "scaled_w",
-                    .endpoint_type = m2::KernelSpec::DFBEndpointType::PRODUCER,
-                    .access_pattern = m2::DFBAccessPattern::STRIDED,
-                },
-                m2::KernelSpec::DFBBinding{
-                    .dfb_spec_name = SCALED_DFB,
-                    .local_accessor_name = "scaled_r",
-                    .endpoint_type = m2::KernelSpec::DFBEndpointType::CONSUMER,
-                    .access_pattern = m2::DFBAccessPattern::STRIDED,
-                },
-            });
-    }
-    if (reduce_hw) {
-        compute.dfb_bindings.insert(
-            compute.dfb_bindings.end(),
-            {
-                m2::KernelSpec::DFBBinding{
-                    .dfb_spec_name = PARTIAL_DFB,
-                    .local_accessor_name = "partial",
-                    .endpoint_type = m2::KernelSpec::DFBEndpointType::PRODUCER,
-                    .access_pattern = m2::DFBAccessPattern::STRIDED,
-                },
-                m2::KernelSpec::DFBBinding{
-                    .dfb_spec_name = COMBINED_DFB,
-                    .local_accessor_name = "combined",
-                    .endpoint_type = m2::KernelSpec::DFBEndpointType::CONSUMER,
-                    .access_pattern = m2::DFBAccessPattern::STRIDED,
-                },
-            });
+
+    const bool group_2_present = wd.core_group_2.num_cores() > 0;
+
+    std::vector<m2::KernelSpec> kernels;
+    kernels.push_back(std::move(reader));
+    kernels.push_back(std::move(writer));
+    kernels.push_back(make_compute_kernel(WELFORD_COMPUTE_KERNEL_G1, wd.num_work_units_per_core_group_1));
+    if (group_2_present) {
+        kernels.push_back(make_compute_kernel(WELFORD_COMPUTE_KERNEL_G2, wd.num_work_units_per_core_group_2));
     }
 
-    // ---- Single work unit ----
-    m2::WorkUnitSpec work_unit;
-    work_unit.unique_id = WELFORD_WORK_UNIT;
-    work_unit.kernels = {WELFORD_READER_KERNEL, WELFORD_WRITER_KERNEL, WELFORD_COMPUTE_KERNEL};
-    work_unit.target_nodes = wd.all_cores;
+    // ---- Work units: one per non-empty core group ----
+    std::vector<m2::WorkUnitSpec> work_units;
+    {
+        m2::WorkUnitSpec wu;
+        wu.unique_id = WELFORD_WORK_UNIT_G1;
+        wu.kernels = {WELFORD_READER_KERNEL, WELFORD_WRITER_KERNEL, WELFORD_COMPUTE_KERNEL_G1};
+        wu.target_nodes = wd.core_group_1;
+        work_units.push_back(std::move(wu));
+    }
+    if (group_2_present) {
+        m2::WorkUnitSpec wu;
+        wu.unique_id = WELFORD_WORK_UNIT_G2;
+        wu.kernels = {WELFORD_READER_KERNEL, WELFORD_WRITER_KERNEL, WELFORD_COMPUTE_KERNEL_G2};
+        wu.target_nodes = wd.core_group_2;
+        work_units.push_back(std::move(wu));
+    }
 
     // ---- Assemble + parameterize ----
     m2::ProgramSpec spec;
     spec.program_id = "ttnn::welford_reduce";
-    spec.kernels = {std::move(reader), std::move(writer), std::move(compute)};
+    spec.kernels = std::move(kernels);
     spec.dataflow_buffers = std::move(dataflow_buffers);
     spec.tensor_parameters = {
         m2::TensorParameter{.unique_id = WELFORD_INPUT_TENSOR, .spec = a.mesh_tensor().tensor_spec()},
         m2::TensorParameter{.unique_id = WELFORD_OUTPUT_TENSOR, .spec = output.mesh_tensor().tensor_spec()},
     };
-    spec.work_units = {std::move(work_unit)};
+    spec.work_units = std::move(work_units);
 
     WelfordReduceSharedVariables shared{
         .cores = wd.cores,

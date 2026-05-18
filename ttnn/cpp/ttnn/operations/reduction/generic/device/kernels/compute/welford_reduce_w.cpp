@@ -5,9 +5,12 @@
 // Metal 2.0 Welford W-dimension reduction compute kernel.
 //
 // Migration notes:
-//   - Compile-time args are bound by name (args::Wt, args::W, args::tile_width,
-//     args::do_scale, args::correction, args::is_std).
-//   - Runtime arg NCHt is bound by name.
+//   - Compile-time args are bound by name (args::NCHt, args::Wt, args::W,
+//     args::tile_width, args::do_scale, args::correction, args::is_std).
+//     `NCHt` (outer-loop count) is per-group: when split_work_to_cores produces
+//     two work groups with different per-core row counts, the host emits two
+//     KernelSpecs of this same source with each group's `NCHt` bound as a CTA,
+//     placed in two WorkUnitSpecs. This preserves compile-time outer-loop unrolling.
 //   - DataflowBuffers are bound by name. cb_var is always bound; cb_scaled is
 //     always bound but only used when do_scale is true (the if constexpr block
 //     gates its references; the wrapper itself just stores the buffer id).
@@ -23,10 +26,8 @@
 #include "experimental/dataflow_buffer.h"
 
 void kernel_main() {
-    // Runtime arg: total outer-loop iterations (N * C * Ht).
-    const uint32_t NCHt = get_arg(args::NCHt);
-
     // Compile-time args.
+    constexpr uint32_t NCHt = get_arg(args::NCHt);  // outer-loop count for this KernelSpec's group
     constexpr uint32_t Wt = get_arg(args::Wt);
     constexpr uint32_t W = get_arg(args::W);
     constexpr uint32_t tile_width = get_arg(args::tile_width);

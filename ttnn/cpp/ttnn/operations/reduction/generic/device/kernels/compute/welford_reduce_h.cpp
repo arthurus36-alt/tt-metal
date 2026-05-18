@@ -16,11 +16,11 @@
 #include "experimental/dataflow_buffer.h"
 
 void kernel_main() {
-    // Runtime arg: number of independent column-reductions this core must perform.
-    // Each column-reduction processes Ht tiles vertically and produces one output tile.
-    const uint32_t NCWt = get_arg(args::NCWt);
-
-    // Compile-time args.
+    // Compile-time args. `NCWt` (number of independent column-reductions for this
+    // KernelSpec's group) is per-group: when split_work_to_cores produces two work
+    // groups, the host emits two KernelSpecs of this source with each group's NCWt
+    // bound as a CTA, preserving compile-time outer-loop unrolling.
+    constexpr uint32_t NCWt = get_arg(args::NCWt);
     constexpr uint32_t Ht = get_arg(args::Ht);
     constexpr uint32_t H = get_arg(args::H);
     constexpr uint32_t tile_height = get_arg(args::tile_height);
