@@ -343,9 +343,7 @@ ALWI void fast_untilize_block(
         {
             const std::uint32_t operand_id = get_operand_id(icb);
             if (fast_untilize_is_bfp_b_input_format(unpack_src_format[operand_id])) {
-                for (std::uint32_t tile = 0; tile < unit_dim; tile++) {
-                    llk_unpack_fast_untilize_block(icb, input_tile_index + tiles_done + tile, 1);
-                }
+                llk_unpack_fast_untilize_bfp_block(icb, input_tile_index + tiles_done, unit_dim);
             } else {
                 if (unit_dim != prev_unpack_unit_dim) {
                     llk_unpack_fast_untilize_reinit_unit_dim<DST_ACCUM_MODE>(unit_dim);

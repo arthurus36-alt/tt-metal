@@ -28,6 +28,11 @@ inline void llk_unpack_fast_untilize_block_at_address(const std::uint32_t addres
     ckernel::_llk_unpack_fast_untilize_block_(address, unit_dim);
 }
 
+inline void llk_unpack_fast_untilize_bfp_block_at_address(
+    const std::uint32_t address, const std::uint32_t tile_stride_16B, const std::uint32_t unit_dim) {
+    ckernel::_llk_unpack_fast_untilize_bfp_block_(address, tile_stride_16B, unit_dim);
+}
+
 #ifndef ENV_LLK_INFRA
 template <bool is_fp32_dest_acc_en>
 inline void llk_unpack_fast_untilize_init(const std::uint32_t operand, const std::uint32_t init_unit_dim) {
@@ -42,6 +47,14 @@ inline void llk_unpack_fast_untilize_block(
     const std::uint32_t address = get_local_cb_interface(operand_id).fifo_rd_ptr +
                                   get_local_cb_interface(operand_id).fifo_page_size * tile_index - 1;
     llk_unpack_fast_untilize_block_at_address(address, unit_dim);
+}
+
+inline void llk_unpack_fast_untilize_bfp_block(
+    const std::uint32_t operand, const std::uint32_t tile_index, const std::uint32_t unit_dim) {
+    const std::uint32_t operand_id = get_operand_id(operand);
+    const std::uint32_t address = get_local_cb_interface(operand_id).fifo_rd_ptr +
+                                  get_local_cb_interface(operand_id).fifo_page_size * tile_index - 1;
+    llk_unpack_fast_untilize_bfp_block_at_address(address, get_local_cb_interface(operand_id).fifo_page_size, unit_dim);
 }
 #endif
 

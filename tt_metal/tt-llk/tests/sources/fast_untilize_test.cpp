@@ -111,10 +111,9 @@ void run_kernel(RUNTIME_PARAMETERS params)
                     const std::uint32_t unit_dim = unit_dims[u];
                     if constexpr (FAST_UNTILIZE_BFP_B_INPUT)
                     {
-                        for (std::uint32_t tile = 0; tile < unit_dim; tile++)
-                        {
-                            llk_unpack_fast_untilize_block_at_address(L1_ADDRESS(buffer_A[rt * FULL_CT_DIM + chunk_col + tile]), 1);
-                        }
+                        const std::uint32_t address         = L1_ADDRESS(buffer_A[rt * FULL_CT_DIM + chunk_col]);
+                        const std::uint32_t tile_stride_16B = L1_ADDRESS(buffer_A[rt * FULL_CT_DIM + chunk_col + 1]) - address;
+                        llk_unpack_fast_untilize_bfp_block_at_address(address, tile_stride_16B, unit_dim);
                     }
                     else
                     {

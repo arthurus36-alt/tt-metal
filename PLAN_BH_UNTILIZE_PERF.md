@@ -1271,3 +1271,53 @@ Next perf ideas, in preferred order:
    long-loop pack-isolate gate; prior MOP liveness issues were silicon-only.
 4. Treat `unit_dim=1` tails as functionally possible but not profitable unless a
    different pack MOP can avoid the `ct=9` regression.
+
+### 2026-05-18 BFP unpack context batching
+
+Goal: address the remaining BFP input bottleneck. The original BFP path used
+`unit_dim=1` and called the unpack block once per tile so each compressed tile
+could start from its own base address and skip that tile's exponent section.
+That was correct, but it reacquired and switched the unpack context for every
+tile in a 2/3/4-tile fast-untilize chunk.
+
+Kept implementation:
+- Add `_llk_unpack_fast_untilize_bfp_block_` and API wrappers.
+- Keep the BFP MOP at one tile, but run a full decomposed chunk under one unpack
+  context.
+- Program the first tile base and a 16B tile stride into `SCRATCH_SEC0_val`.
+- Between one-tile MOP runs, use `CFGSHIFTMASK` on the active SrcA base register
+  and reset Z/W counters before the next tile.
+- Use the chunked helper from both the LLK harness and the production
+  `fast_untilize_block` BFP branch.
+
+Validation:
+- Focused smoke: BFP8 -> FP16, `rt=1`, `ct=2`, dest16, SyncHalf row-id -> pass.
+- Target correctness: BFP8/BFP4, FP16/FP32 output, dest16/dest32 where valid,
+  SyncHalf/SyncFull, `rt=4`, `ct=8`, row-id/random -> `24 passed`.
+- Full BFP correctness matrix:
+  `python_env/bin/python3 -m pytest -q --tb=short tt_metal/tt-llk/tests/python_tests/test_fast_untilize.py` filtered to BFP inputs
+  -> `720 passed in 140.38s`.
+- Focused perf target:
+  BFP8/BFP4, FP16/FP32 output, dest16/dest32 where valid, SyncHalf/SyncFull,
+  `rt=4`, `ct=8`, `loop_factor=16` -> `12 passed`.
+- BFP `rt=4`, all supported `ct`, `loop_factor=16` perf sweep -> `120 passed
+  in 128.47s`.
+
+Perf result:
+- At `rt=4`, `ct=8`, `loop_factor=16`, BFP `UNPACK_ISOLATE` drops from about
+  `56.77` to `24.6 cyc/tile` (`~56.6%` faster).
+- End-to-end L1 only moves when unpack was the limiting thread. The largest
+  target win is BFP -> FP16, dest32, SyncHalf: `~57.1 -> ~41.5 cyc/tile`
+  (`~27.3%` faster).
+- FullSync and pack-heavy variants improve little end-to-end because pack/sync
+  remains dominant even after the BFP unpack win.
+- Compared with `/tmp/fast_untilize_counter_hoist_wide_candidate.post.csv` for
+  `rt=4`, `ct=5/6/7/8/9/12/16`, `loop_factor=16`, UNPACK improves by `~40-58%`
+  with no L1 regressions in the covered rows.
+
+Next perf ideas, in preferred order:
+1. Investigate FullSync overhead now that BFP unpack is no longer the dominant
+   thread in the target dest32/Half path.
+2. Re-check pack-heavy BFP variants after any FullSync or pack sequencing work.
+3. Keep destination-programming reuse deferred unless common production shapes
+   justify the extra API surface.
