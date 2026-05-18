@@ -112,7 +112,6 @@ def decode_forward(
             tt_v = ttnn.to_memory_config(tt_v, q_sharded_mem)
 
             if page_table is not None:
-                eff_bs = effective_block_size(k_cache, config.head_dim)
                 # Per-device kv-head count of the layer's input view. When the cache
                 # was allocated for a different layer type under HMA cross-group
                 # sharing (Gemma4-26B-A4B sliding kv=8 / full kv=2 on multi-device
@@ -120,6 +119,7 @@ def decode_forward(
                 # write — see paged_update_cache num_kv_heads kwarg. Mirrors
                 # split_qkv_heads_decode's local head count.
                 num_local_kv_heads = 1 if weights.kv_replicated else config.num_key_value_heads // tp
+                eff_bs = effective_block_size(k_cache, config.head_dim, num_local_kv_heads)
                 ttnn.experimental.paged_update_cache(
                     k_cache,
                     tt_k,
@@ -167,6 +167,7 @@ def decode_forward(
     )
 
     if page_table is not None:
+        sdpa_num_local_kv_heads = 1 if weights.kv_replicated else config.num_key_value_heads // tp
         tt_sdpa = ttnn.transformer.paged_scaled_dot_product_attention_decode(
             tt_q,
             k_cache,
@@ -177,7 +178,7 @@ def decode_forward(
             sliding_window_size=sliding_window,
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
             program_config=sdpa_program_config,
-            block_size=effective_block_size(k_cache, config.head_dim),
+            block_size=effective_block_size(k_cache, config.head_dim, sdpa_num_local_kv_heads),
         )
     else:
         tt_sdpa = ttnn.transformer.scaled_dot_product_attention_decode(

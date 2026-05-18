@@ -262,7 +262,15 @@ def test_attention_paged_decode_via_harness(layer_type, mesh_device, reset_seeds
     v_fill = ttnn.from_torch(v_ref.to(torch.bfloat16), device=mesh_device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
     k_cache_tt, v_cache_tt = kv_per_layer[layer_idx]
     li = layout.per_layer[layer_idx]
-    effective_block_size = k_cache_tt.padded_shape[2] * k_cache_tt.padded_shape[-1] // config.head_dim
+    # Per-block element-count invariant under HMA cross-group sharing:
+    # input_kv * eff_bs * input_hd == cache_kv * cache_bs * cache_hd
+    # → eff_bs = cache_kv * cache_bs * cache_hd // (input_kv * input_hd)
+    # Required when sliding (kv=8/16) and full (kv=2/4) layers share one buffer
+    # on 26B-A4B / 31B at small TP. Mirrors the production helper at
+    # models/demos/gemma4/tt/attention/operations.py:effective_block_size.
+    effective_block_size = (k_cache_tt.padded_shape[1] * k_cache_tt.padded_shape[2] * k_cache_tt.padded_shape[-1]) // (
+        config.num_key_value_heads * config.head_dim
+    )
     # Same call shape ``attention/prefill.py`` uses on the vllm path.
     ttnn.experimental.paged_fill_cache(k_cache_tt, k_fill, pt_tt, batch_idx=0, block_size=effective_block_size)
     ttnn.experimental.paged_fill_cache(v_cache_tt, v_fill, pt_tt, batch_idx=0, block_size=effective_block_size)
@@ -379,7 +387,10 @@ def test_kv_shared_alias_round_trip(mesh_device, reset_seeds):
     k_ref = torch.randn(1, config0.num_key_value_heads, 64, config0.head_dim)
     k_fill = ttnn.from_torch(k_ref.to(torch.bfloat16), device=mesh_device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
     k_cache_tt, _ = kv_per_layer[0]
-    eff_bs = k_cache_tt.padded_shape[2] * k_cache_tt.padded_shape[-1] // config0.head_dim
+    # See test_attention_paged_decode_via_harness for the asymmetric-kv formula.
+    eff_bs = (k_cache_tt.padded_shape[1] * k_cache_tt.padded_shape[2] * k_cache_tt.padded_shape[-1]) // (
+        config0.num_key_value_heads * config0.head_dim
+    )
     ttnn.experimental.paged_fill_cache(k_cache_tt, k_fill, pt_layer_0, batch_idx=0, block_size=eff_bs)
 
     # Read back: tensor identity guarantees this is the same buffer.
@@ -463,7 +474,10 @@ def test_layer_forward_decode_via_harness(mesh_device, reset_seeds, request):
     k_data = torch.randn(1, attn_cfg.num_key_value_heads, cache_len, attn_cfg.head_dim)
     v_data = torch.randn(1, attn_cfg.num_key_value_heads, cache_len, attn_cfg.head_dim)
     k_cache_tt, v_cache_tt = kv_per_layer[layer_idx]
-    eff_bs = k_cache_tt.padded_shape[2] * k_cache_tt.padded_shape[-1] // attn_cfg.head_dim
+    # See test_attention_paged_decode_via_harness for the asymmetric-kv formula.
+    eff_bs = (k_cache_tt.padded_shape[1] * k_cache_tt.padded_shape[2] * k_cache_tt.padded_shape[-1]) // (
+        attn_cfg.num_key_value_heads * attn_cfg.head_dim
+    )
     k_fill = ttnn.from_torch(
         k_data.to(torch.bfloat16), device=mesh_device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
     )
