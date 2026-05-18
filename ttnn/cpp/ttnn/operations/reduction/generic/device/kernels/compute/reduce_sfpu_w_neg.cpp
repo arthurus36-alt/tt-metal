@@ -54,22 +54,20 @@ void kernel_main() {
         for (uint32_t ht = 0; ht < Ht; ++ht) {
             tile_regs_acquire();
 
-            if (Wt > 1) {
+            negative_tile_init();
+            if constexpr (Wt > 1) {
                 compute_kernel_lib::detail::sfpu_reduce_max_fold_init<REDUCE_FORMAT>();
             }
 
             cb_wait_front(cb_input, onetile);
             copy_tile(cb_input, 0, acc_dst);
             cb_pop_front(cb_input, onetile);
-            negative_tile_init();
             negate(acc_dst);
 
             for (uint32_t wt = 1; wt < Wt; ++wt) {
                 cb_wait_front(cb_input, onetile);
                 copy_tile(cb_input, 0, work_dst);
-                negative_tile_init();
                 negate(work_dst);
-                compute_kernel_lib::detail::sfpu_reduce_max_fold_init<REDUCE_FORMAT>();
                 compute_kernel_lib::detail::sfpu_reduce_max_fold_tile<REDUCE_FORMAT>(acc_dst, work_dst, acc_dst);
                 cb_pop_front(cb_input, onetile);
             }
@@ -77,7 +75,6 @@ void kernel_main() {
             sfpu_reduce_init<REDUCE_OP, REDUCE_FORMAT>();
             sfpu_reduce<REDUCE_OP, REDUCE_FORMAT, REDUCE_DIM>(acc_dst, /*ct_dim=*/1, /*rt_dim=*/1);
 
-            negative_tile_init();
             negate(acc_dst);
 
 #ifdef REDUCE_POST_MUL

@@ -61,18 +61,20 @@ void kernel_main() {
 
             tile_regs_acquire();
 
+            negative_tile_init();
+            if constexpr (Ht > 1) {
+                compute_kernel_lib::detail::sfpu_reduce_max_fold_init<REDUCE_FORMAT>();
+            }
+
             for (uint32_t ht = 0; ht < Ht; ++ht) {
                 for (uint32_t k = 0; k < current_chunk; ++k) {
                     cb_wait_front(cb_input, onetile);
                     if (ht == 0) {
                         copy_tile(cb_input, 0, k);
-                        negative_tile_init();
                         negate(k);
                     } else {
                         copy_tile(cb_input, 0, work_dst);
-                        negative_tile_init();
                         negate(work_dst);
-                        compute_kernel_lib::detail::sfpu_reduce_max_fold_init<REDUCE_FORMAT>();
                         compute_kernel_lib::detail::sfpu_reduce_max_fold_tile<REDUCE_FORMAT>(k, work_dst, k);
                     }
                     cb_pop_front(cb_input, onetile);
@@ -84,7 +86,6 @@ void kernel_main() {
                 sfpu_reduce<REDUCE_OP, REDUCE_FORMAT, REDUCE_DIM>(k, /*ct_dim=*/1, /*rt_dim=*/1);
             }
 
-            negative_tile_init();
             for (uint32_t k = 0; k < current_chunk; ++k) {
                 negate(k);
             }

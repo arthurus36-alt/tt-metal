@@ -67,12 +67,12 @@ ALWI void sfpu_post_mul_tile(uint32_t dst, uint32_t scaler_bits) {
     }
 }
 
-}  // namespace detail
-
 // True if `sfpu_format` requests the SFPU reduce path (Int32/Float32 MAX).
 constexpr bool is_sfpu_reduce_format(DataFormat f) {
     return f == DataFormat::Int32 || f == DataFormat::Float32;
 }
+
+}  // namespace detail
 
 // HiFi4 fidelity for matmul-based reduce (higher precision than kernel default)
 constexpr ckernel::MathFidelity REDUCE_MATMUL_FIDELITY = ckernel::MathFidelity::HiFi4;
@@ -281,7 +281,7 @@ ALWI void reduce(
     // =========================================================================
     // SFPU path (Int32/Float32 MAX). MIN is dispatched via reduce_sfpu_{h,w}_neg.cpp.
     // =========================================================================
-    if constexpr (is_sfpu_reduce_format(sfpu_format)) {
+    if constexpr (detail::is_sfpu_reduce_format(sfpu_format)) {
         static_assert(
             reduce_type == PoolType::MAX,
             "SFPU reduce path: MAX only (MIN dispatches to reduce_sfpu_{h,w}_neg.cpp).");
