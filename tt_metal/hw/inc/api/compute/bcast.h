@@ -294,11 +294,7 @@ template <EltwiseBinaryType tBcastOp, BroadcastType tBcastDim>
 void init_bcast(uint32_t icb0, uint32_t icb1, uint32_t ocb, uint32_t call_line = __builtin_LINE()) {
     state_configure(icb0, icb1, ocb, call_line);
 #ifndef ARCH_QUASAR
-    if constexpr (tBcastOp == EltwiseBinaryType::ELWMUL) {
-        MATH((llk_math_eltwise_binary_init<tBcastOp, tBcastDim, MATH_FIDELITY>(icb0, icb1)));
-    } else {
-        MATH((llk_math_eltwise_binary_init<tBcastOp, tBcastDim, MathFidelity::LoFi>(icb0, icb1)));
-    }
+    MATH((llk_math_eltwise_binary_init<tBcastOp, tBcastDim, MATH_FIDELITY>(icb0, icb1)));
 
     UNPACK((llk_unpack_hw_configure<DST_ACCUM_MODE>(icb0, icb1)));
     UNPACK((llk_unpack_AB_init<tBcastDim>(icb0, icb1)));
@@ -328,21 +324,8 @@ Internal helper function for all broadcast ops
 template <EltwiseBinaryType tBcastOp, BroadcastType tBcastDim>
 ALWI void any_tiles_bcast(
     uint32_t icb0, uint32_t icb1, uint32_t itile0, uint32_t itile1, uint32_t idst, uint32_t bcast_row_idx = 0) {
-    if constexpr (tBcastOp == EltwiseBinaryType::ELWMUL) {
-        MATH((llk_math_eltwise_binary<
-              tBcastOp,
-              tBcastDim,
-              DST_ACCUM_MODE,
-              MATH_FIDELITY,
-              EltwiseBinaryReuseDestType::NONE>(icb0, icb1, idst, true)));
-    } else {
-        MATH((llk_math_eltwise_binary<
-              tBcastOp,
-              tBcastDim,
-              DST_ACCUM_MODE,
-              MathFidelity::LoFi,
-              EltwiseBinaryReuseDestType::NONE>(icb0, icb1, idst, true)));
-    }
+    MATH((llk_math_eltwise_binary<tBcastOp, tBcastDim, DST_ACCUM_MODE, MATH_FIDELITY, EltwiseBinaryReuseDestType::NONE>(
+        icb0, icb1, idst, true)));
     UNPACK((llk_unpack_AB<tBcastDim>(icb0, icb1, itile0, itile1, bcast_row_idx)));
 }
 

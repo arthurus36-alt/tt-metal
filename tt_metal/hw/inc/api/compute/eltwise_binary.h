@@ -73,13 +73,8 @@ ALWI void binary_tiles_init(
     uint32_t icb0, uint32_t icb1, bool acc_to_dest = false, uint32_t call_line = __builtin_LINE()) {
     state_configure(icb0, icb1, call_line);
 
-    if constexpr (eltwise_binary_type == EltwiseBinaryType::ELWMUL) {
-        MATH((llk_math_eltwise_binary_init<eltwise_binary_type, BroadcastType::NONE, MATH_FIDELITY>(
-            icb0, icb1, acc_to_dest)));
-    } else {
-        MATH((llk_math_eltwise_binary_init<eltwise_binary_type, BroadcastType::NONE, MathFidelity::LoFi>(
-            icb0, icb1, acc_to_dest)));
-    }
+    MATH((llk_math_eltwise_binary_init<eltwise_binary_type, BroadcastType::NONE, MATH_FIDELITY>(
+        icb0, icb1, acc_to_dest)));
 
     if constexpr (full_init) {
         UNPACK((llk_unpack_AB_init<BroadcastType::NONE>(icb0, icb1, Transpose::None)));
@@ -244,16 +239,8 @@ ALWI void binary_dest_reuse_tiles_init(uint32_t icb0, uint32_t call_line = __bui
         constexpr bool acc_to_dest = false;
     #endif
     UNPACK((llk_unpack_A_init<BroadcastType::NONE, acc_to_dest, binary_reuse_dest>(false, false, icb0)));
-    if constexpr (eltwise_binary_type == EltwiseBinaryType::ELWMUL) {
-        MATH((llk_math_eltwise_binary_init<eltwise_binary_type, BroadcastType::NONE, MATH_FIDELITY, binary_reuse_dest>(
-            icb0, icb0, false)));
-    } else {
-        MATH((llk_math_eltwise_binary_init<
-              eltwise_binary_type,
-              BroadcastType::NONE,
-              MathFidelity::LoFi,
-              binary_reuse_dest>(icb0, icb0, false)));
-    }
+    MATH((llk_math_eltwise_binary_init<eltwise_binary_type, BroadcastType::NONE, MATH_FIDELITY, binary_reuse_dest>(
+        icb0, icb0, false)));
 }
 
 // clang-format off
@@ -290,13 +277,12 @@ ALWI void binary_dest_reuse_tiles(uint32_t in_cb_id, uint32_t in_tile_index, uin
         constexpr bool acc_to_dest = false;
     #endif
     UNPACK((llk_unpack_A<BroadcastType::NONE, acc_to_dest, binary_reuse_dest>(in_cb_id, in_tile_index)));
-    if constexpr (eltwise_binary_type == EltwiseBinaryType::ELWMUL) {
-        MATH((llk_math_eltwise_binary<eltwise_binary_type, BroadcastType::NONE, DST_ACCUM_MODE, MATH_FIDELITY, binary_reuse_dest>(
-            in_cb_id, in_cb_id, dst_tile_index, true)));
-    } else {
-        MATH((llk_math_eltwise_binary<eltwise_binary_type, BroadcastType::NONE, DST_ACCUM_MODE, MathFidelity::LoFi, binary_reuse_dest>(
-            in_cb_id, in_cb_id, dst_tile_index, true)));
-    }
+    MATH((llk_math_eltwise_binary<
+          eltwise_binary_type,
+          BroadcastType::NONE,
+          DST_ACCUM_MODE,
+          MATH_FIDELITY,
+          binary_reuse_dest>(in_cb_id, in_cb_id, dst_tile_index, true)));
 }
 
 }  // namespace ckernel
