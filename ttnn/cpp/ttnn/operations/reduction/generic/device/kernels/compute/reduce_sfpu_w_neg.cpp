@@ -47,7 +47,7 @@ void kernel_main() {
 
     cb_wait_front(cb_scaler, onetile);
 
-    PACK((llk_pack_reduce_mask_config<false /*untilize*/, REDUCE_DIM>()));
+    PACK((llk_pack_reduce_mask_config<REDUCE_DIM>()));
 
     // W-axis reduce: outer iterates output rows (Ht), inner folds Wt input tiles per output.
     for (uint32_t nc = 0; nc < NC; ++nc) {

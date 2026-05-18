@@ -305,7 +305,7 @@ ALWI void reduce(
 
         constexpr uint32_t onetile = 1;
         scaler_cb.wait_front(onetile);
-        PACK((llk_pack_reduce_mask_config<false /*untilize*/, reduce_dim>()));
+        PACK((llk_pack_reduce_mask_config<reduce_dim>()));
 
         if constexpr (reduce_dim == ReduceDim::REDUCE_COL) {
             // H-reduce. Chunk Wt outputs across DEST. SFPU needs one extra DST register beyond

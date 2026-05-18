@@ -51,7 +51,7 @@ void kernel_main() {
 
     cb_wait_front(cb_scaler, onetile);
 
-    PACK((llk_pack_reduce_mask_config<false /*untilize*/, REDUCE_DIM>()));
+    PACK((llk_pack_reduce_mask_config<REDUCE_DIM>()));
 
     // H-axis MIN as -MAX(-x), chunked over `row_chunk` output columns at a time.
     for (uint32_t nc = 0; nc < NC; ++nc) {
