@@ -227,9 +227,14 @@ Move the per-row Y increment into the AddrMod of the PACR itself; eliminate the 
 
 ---
 
-### Task 4 — Ch1 (output side) counters (#42052) — ATTEMPTED, REVERTED (silicon evidence: BH has 256B mask)
+### Task 4 — Ch1 (output side) counters (#42052) — ATTEMPTED, REVERTED (superseded)
 
 **Status (2026-05-16):** Implemented and tested on silicon. Reverted; functional regression on small strides.
+
+**Update (2026-05-18):** The later fast-untilize ch1 pass showed that the
+stride field must be programmed in bytes, not 16B units. Treat the 2026-05-16
+mask conclusion below as a historical failed-attempt diagnosis, not a confirmed
+BH hardware limit.
 
 **What was tried:**
 1. `_llk_pack_untilize_configure_addrmod_`: added `.y_dst.incr=1` to `ADDR_MOD_1` so the row-closing PACR auto-advances ch1.Y post-PACR.
@@ -241,7 +246,10 @@ Move the per-row Y increment into the AddrMod of the PACR itself; eliminate the 
 - perf_pack_untilize.py: 832 passed (kernel doesn't hang) — but **perf harness doesn't validate output correctness** (`helpers/perf.py` measures cycles only).
 - test_zzz_pack_untilize.py: **FAILED at the very first variant** (`Float16_b→Float16_b, [64,64]`, ct=2 → 128 B/row → 8 in 16B units → masks to 0). Output rows all wrote to the same base address. Golden-tensor mismatch.
 
-**Conclusion:** BH applies the same `(YZW_Addr & ~0xf)` 16B-unit mask documented in the WH ISA — confirmed empirically. Effective per-row stride floor is **256 bytes**. For our perf sweep:
+**Original conclusion (superseded):** BH appeared to apply the same
+`(YZW_Addr & ~0xf)` 16B-unit mask documented in the WH ISA. The later
+byte-stride correction invalidated this as a hardware-limit conclusion. At the
+time, the interpreted perf-sweep impact was:
 - ct=1..3 (FP16: 64..192 B/row) — broken
 - ct=4 (FP16: 256 B/row) — works
 - ct=5..7 (320..448 B/row, not multiples of 256) — broken (truncated to 256)
@@ -254,7 +262,8 @@ T4 as a drop-in replacement for CFGSHIFTMASK is **not viable** because most shap
 
 **Reverted to T3 state.** Diff: `git show 0a16daf4b4b` (T3 commit unchanged). Functional test_zzz_pack_untilize.py passes (156 / 100 skip).
 
-**For the record:** the mask hypothesis is now confirmed (was speculation before). Update `[[bh_pack_untilize_perf]]` memory with this finding.
+**For the record:** this mask hypothesis was later superseded by the 2026-05-18
+byte-stride finding in the fast-untilize path.
 
 ### Task 4 (deferred) — original sketch retained below for reference
 
@@ -741,7 +750,7 @@ Pre-stage next iter's config in inactive bank while current iter is packing. Eli
 | T1 Bfp8 max_block_dim | local | **dropped** | 0.5d | — (HW limit, not harness) |
 | T2 CFGSHIFTMASK pack | #42050 | **done** (76452552f02) | 3d | -26.7% L1_TO_L1 mean (max -47.5%) |
 | T3 AddrMod | #42051 | **done** (0a16daf4b4b) | 4d | -5.2% on top of T2 (cumulative -30.2%) |
-| T4 Ch1 counters | #42052 | **attempted, reverted** | 3d | BH applies WH-style 16B-mask → broken for <256B strides |
+| T4 Ch1 counters | #42052 | **attempted, reverted; later superseded** | 3d | Later fast-untilize pass showed ch1 output stride is byte-addressed |
 | T5 4-intf + dirty dest | #42048 + #42049 | **bring-up accuracy + perf pass** (branch pjosipovic/bh-untilize-t5; ct=2..8, rt coverage staged) | 12-15d | 30-50% (structural, requires math co-design) |
 | T6 Unpack | (no issue yet) | **attempted, deferred** | 3d | 5-10% (separate branch) |
 | T7 DeepSeek integ smoke | — | not started | 1d | verify |
@@ -1036,7 +1045,7 @@ These are explicitly perf experiments, not cleanup. Each item needs an isolated 
 
 | idea | likely target | potential win | main risk |
 |:---|:---|:---|:---|
-| Shape-gated ch1 output counters for legal output strides | `ct=4/8`-style strides that are multiples of 256B | high on eligible shapes | BH masks ch1 strides to 256B granularity; ungated use corrupts rows for smaller/non-aligned strides. |
+| Ch1 output-counter row advance for strided rows | `ct>4` wide rows | completed | Kept in the 2026-05-18 pass after correcting the ch1 output stride units to bytes. |
 | Further compress row-strided `ct>4` MOP/replay | wide rows, especially `ct=5..8` | medium/high | Previous wide path had silicon-only `mop_sync` liveness failures. Long-loop pack-isolate must be the first gate. |
 | Hoist or reuse destination programming across repeated same-width chunks | repeated chunks / repeated rows | medium | Stale `L1_Dest_addr` or phase state can produce plausible but wrong row-major output. |
 | Replace row-close `CFGSHIFTMASK` with `RMWCIB` or manual cfg patching | strided pack row advance | medium | Config-pipeline ordering is touchy; simulator may not catch timing hazards. |
@@ -1047,10 +1056,9 @@ These are explicitly perf experiments, not cleanup. Each item needs an isolated 
 | CFG bank ping-pong for pack config/MOP state | broad pack config overhead | low/medium | Bigger LLK-state blast radius; touches shared config-bank assumptions. |
 
 Preferred order if we take more perf risk:
-1. Shape-gated ch1 output counters, because the hardware constraint is known and can be guarded.
-2. Row-strided `ct>4` MOP/replay compression, starting with `ct=5/8`, `loop_factor>=16`, `PACK_ISOLATE`.
-3. Destination-programming hoist for repeated same-width chunks, with guard-sentinel accuracy first.
-4. Phase fusion or sync removal only after the above are exhausted.
+1. Row-strided `ct>4` MOP/replay compression, starting with `ct=5/8`, `loop_factor>=16`, `PACK_ISOLATE`.
+2. Destination-programming hoist for repeated same-width chunks, with guard-sentinel accuracy first.
+3. Phase fusion or sync removal only after the above are exhausted.
 
 Current next action: promotion from the experimental test path into the production untilize path. Keep the fast path gated by the existing BH/format/dest constraints, preserve legacy fallback from day one, and use the full `test_fast_untilize.py` plus `perf_fast_untilize.py`/`perf_fast_untilize_legacy_compare.py` matrix as the merge gate.
 
@@ -1085,7 +1093,7 @@ Candidate list and outcomes:
 
 | idea | target | outcome |
 |:---|:---|:---|
-| Shape-gated ch1 output counters | aligned wide-row output strides | Rejected. Correctness failed for `ct=8/12/16` with row-layout corruption; needs output address generator debug before retry. |
+| Shape-gated ch1 output counters | aligned wide-row output strides | Initially rejected. Superseded by the 2026-05-18 ch1 pass; the corruption was a byte-vs-16B stride programming bug. |
 | `ct=5` decomposition `3+2` instead of `2+3` | odd wide rows | Rejected. Correctness passed, perf was effectively unchanged. |
 | Multi-tile BFP unpack MOP | BFP inputs | Rejected. Correctness passed for focused cases, perf was unchanged. |
 | Row-advance replay length 1 / remove replay NOP | strided row close | Rejected. Correctness failed; the NOP is required before the next PACR observes the shifted address. |
@@ -1136,8 +1144,82 @@ Correctness gate:
 - `python_env/bin/python3 -m pytest -q --tb=short tt_metal/tt-llk/tests/python_tests/test_fast_untilize.py`
 - Result after both kept changes: `2160 passed in 404.68s`, including row-id/random stimuli, `SyncHalf`/`SyncFull`, supported format matrix, and overflow guard sentinels.
 
+### 2026-05-18 ch1 output-counter row advance
+
+Goal: replace the hot row-close `CFGSHIFTMASK` replay in the strided `ct>4`
+path with pack output-counter ch1.Y advancement.
+
+Finding:
+- The earlier "256B stride floor" conclusion was wrong. The failure came from
+  programming `PCK0_ADDR_CTRL_XY_REG_1_Ystride` in 16B units. On BH, the ch1
+  output stride field expects **bytes**; using `/16` made `ct=8` fp16 row 0
+  write like `[1, 2, 3, ...]` instead of the expected row-major interleave
+  `[1, 17, 65, 81, ...]`.
+- The ttsim model also needed output ch1 base/stride support and the same byte
+  addressing rule. With that patch, the simulator is useful for fp16/fp32 row
+  layout smoke tests. It still rejects BFP4 unpack format pairing, so BFP4
+  coverage remains hardware-only for now.
+
+Kept implementation:
+- Add `FAST_UNTILIZE_STRIDED_CH1_ROW_ADVANCE`, default enabled.
+- For strided `full_ct_dim > block_ct_dim` with MOP/replay enabled, program
+  `PCK0_ADDR_CTRL_XY_REG_1_Ystride` to the full output row stride in bytes.
+- Add `y_dst.incr=1` to `ADDR_MOD_1` and omit the per-row replay end-op from the
+  strided MOP when ch1 row advance is active.
+- Reset ch1.Y at the start of each strided block and when restoring pack
+  counters, so repeated chunks start from the programmed base address.
+- Clear ch1 output stride/base only in fast-untilize uninit instantiations that
+  actually use the strided ch1 path. Production and the LLK harness pass
+  `full_ct_dim` through pack uninit for that compile-time gate.
+
+Validation:
+- Smoke after the uninit gate: `ct=2` and `ct=8` fp16 row-id cases passed.
+- Full LLK correctness:
+  `python_env/bin/python3 -m pytest -q --tb=short -o log_cli=false tt_metal/tt-llk/tests/python_tests/test_fast_untilize.py`
+  -> `2160 passed in 397.34s`.
+- Wide-row perf gate:
+  `python_env/bin/python3 -m pytest -q --tb=short -o log_cli=false tt_metal/tt-llk/tests/python_tests/perf_fast_untilize.py -k 'loop_factor:16 and (ct_dim:5 or ct_dim:6 or ct_dim:7 or ct_dim:8 or ct_dim:9 or ct_dim:12 or ct_dim:16)'`
+  -> `378 passed, 1242 deselected in 397.81s`.
+
+Matched perf result vs `/tmp/fast_untilize_no_final_stall_wide_allformats_candidate.post.csv`
+over 378 KERNEL variants and 378 TILE_LOOP variants (`ct=5/6/7/8/9/12/16`,
+`rt=1/2/4`, all supported formats, `SyncHalf`/`SyncFull`, dest 16/32 as
+applicable):
+
+| marker | run type | min delta | mean delta | max delta | regressions >2% |
+|:---|:---|---:|---:|---:|---:|
+| KERNEL | `L1_TO_L1` | `-8.17%` | `-2.07%` | `+0.05%` | 0 |
+| KERNEL | `PACK_ISOLATE` | `-24.59%` | `-9.56%` | `+0.18%` | 0 |
+| KERNEL | `UNPACK_ISOLATE` | `-0.09%` | `0.00%` | `+0.09%` | 0 |
+| KERNEL | `MATH_ISOLATE` | `-0.26%` | `-0.01%` | `+0.23%` | 0 |
+| TILE_LOOP | `L1_TO_L1` | `-8.40%` | `-2.21%` | `-0.01%` | 0 |
+| TILE_LOOP | `PACK_ISOLATE` | `-25.54%` | `-10.02%` | `+0.02%` | 0 |
+
+By `ct`, KERNEL `PACK_ISOLATE` mean deltas:
+
+| `ct` | mean delta | min delta | max delta |
+|---:|---:|---:|---:|
+| 5 | `-12.86%` | `-24.59%` | `-2.14%` |
+| 6 | `-11.93%` | `-24.46%` | `-0.07%` |
+| 7 | `-10.32%` | `-22.02%` | `+0.10%` |
+| 8 | `-6.70%` | `-16.27%` | `+0.18%` |
+| 9 | `-11.25%` | `-23.77%` | `-0.01%` |
+| 12 | `-6.88%` | `-16.48%` | `+0.09%` |
+| 16 | `-6.96%` | `-16.60%` | `+0.04%` |
+
+Conclusion:
+- Keep ch1 row advance enabled by default for strided `ct>4`.
+- The old CFGSHIFTMASK replay path remains behind
+  `FAST_UNTILIZE_STRIDED_CH1_ROW_ADVANCE=0` as a fallback.
+- Remaining wide-row pack headroom is now shape-specific; the generic row-close
+  replay cost is mostly gone from the default path.
+
 Next perf ideas, in preferred order:
-1. Retry ch1 output counters only after confirming the output-address-generator register selection; prior attempts corrupt layout.
-2. Revisit row-close address update alternatives (`RMWCIB`/manual cfg patch) with a kill switch; config ordering is the main risk.
-3. Treat `unit_dim=1` tails as functionally possible but not profitable unless a different pack MOP can avoid the `ct=9` regression.
-4. If more pack wins are needed, profile per-shape chunks to find cases where the replay MOP still has excess instruction bubbles; most obvious generic wait removal is now exhausted.
+1. Profile remaining neutral/low-win shapes (`ct=8/12/16`, dest-acc fp32) to see
+   whether output-counter advancement is no longer the dominant cost.
+2. Try destination-programming hoist/reuse across repeated same-width chunks,
+   with guard-sentinel correctness first.
+3. Revisit strided MOP compression only with ttsim counter visibility and a
+   long-loop pack-isolate gate; prior MOP liveness issues were silicon-only.
+4. Treat `unit_dim=1` tails as functionally possible but not profitable unless a
+   different pack MOP can avoid the `ct=9` regression.

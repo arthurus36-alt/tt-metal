@@ -57,18 +57,27 @@ inline void llk_pack_fast_untilize_block_strided_at_address(
         address, unit_dim, prev_unit_dim, num_faces);
 }
 
-template <DstSync Dst, bool is_fp32_dest_acc_en>
+template <
+    DstSync Dst,
+    bool is_fp32_dest_acc_en,
+    std::uint32_t block_ct_dim = 4,
+    std::uint32_t full_ct_dim = block_ct_dim>
 inline void llk_pack_fast_untilize_uninit_with_formats(
     const std::uint32_t pack_dst_format,
     const std::uint32_t pack_src_format = static_cast<std::uint32_t>(DataFormat::Float16_b)) {
-    ckernel::_llk_pack_fast_untilize_uninit_<Dst, is_fp32_dest_acc_en>(pack_dst_format, pack_src_format);
+    ckernel::_llk_pack_fast_untilize_uninit_<Dst, is_fp32_dest_acc_en, block_ct_dim, full_ct_dim>(
+        pack_dst_format, pack_src_format);
 }
 
 #ifndef ENV_LLK_INFRA
-template <DstSync Dst, bool is_fp32_dest_acc_en>
+template <
+    DstSync Dst,
+    bool is_fp32_dest_acc_en,
+    std::uint32_t block_ct_dim = 4,
+    std::uint32_t full_ct_dim = block_ct_dim>
 inline void llk_pack_fast_untilize_uninit(const std::uint32_t output) {
     const std::uint32_t output_id = get_output_id(output);
-    llk_pack_fast_untilize_uninit_with_formats<Dst, is_fp32_dest_acc_en>(
+    llk_pack_fast_untilize_uninit_with_formats<Dst, is_fp32_dest_acc_en, block_ct_dim, full_ct_dim>(
         pack_dst_format[output_id], pack_src_format[output_id]);
 }
 #endif

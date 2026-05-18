@@ -414,7 +414,7 @@ ALWI void fast_untilize_uninit(uint32_t icb, uint32_t ocb) {
     PACK((llk_init_packer_dest_offset_registers<PackMode::Default>()));
     PACK((llk_pack_reconfig_data_format<DST_ACCUM_MODE>(ocb)));
     PACK((llk_pack_init(ocb)));
-    PACK((llk_pack_fast_untilize_uninit<DST_SYNC_MODE, DST_ACCUM_MODE>(ocb)));
+    PACK((llk_pack_fast_untilize_uninit<DST_SYNC_MODE, DST_ACCUM_MODE, FAST_UNTILIZE_MAX_UNIT_DIM, full_ct_dim>(ocb)));
 #else
     pack_untilize_uninit(ocb);
 #endif

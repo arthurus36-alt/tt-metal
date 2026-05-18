@@ -298,7 +298,7 @@ void run_kernel(RUNTIME_PARAMETERS params)
     }
     {
         ZONE_SCOPED("UNINIT")
-        llk_pack_fast_untilize_uninit_with_formats<dest_sync, is_fp32_dest_acc_en>(formats.pack_dst, formats.pack_src);
+        llk_pack_fast_untilize_uninit_with_formats<dest_sync, is_fp32_dest_acc_en, FAST_UNTILIZE_MAX_UNIT_DIM, FULL_CT_DIM>(formats.pack_dst, formats.pack_src);
     }
 
     if (NUM_GUARD > 1)
