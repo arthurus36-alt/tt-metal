@@ -170,6 +170,17 @@ inline void _llk_pack_fast_untilize_load_row_advance_replay_()
         });
 }
 
+inline void _llk_pack_fast_untilize_reset_src_counters_()
+{
+    TTI_SETADCXY(p_setadc::PAC, 0, 0, 0, 0, 0b0011);
+    TTI_SETADCZW(p_setadc::PAC, 0, 0, 0, 0, 0b0101);
+}
+
+inline void _llk_pack_fast_untilize_reset_output_row_counter_()
+{
+    TTI_SETADCXY(p_setadc::PAC, 0, 0, 0, 0, 0b1000);
+}
+
 template <bool row_advance_via_ch1 = false>
 inline void _llk_pack_fast_untilize_strided_mop_config_(const std::uint32_t unit_dim)
 {
@@ -343,9 +354,11 @@ inline void _llk_pack_fast_untilize_init_(const std::uint32_t pack_src_format, c
     {
         const std::uint32_t output_row_stride = SCALE_DATUM_SIZE(pack_dst_format, full_ct_dim * TILE_C_DIM);
         const std::uint32_t output_row_stride_16B = output_row_stride / 16;
+        _llk_pack_fast_untilize_reset_src_counters_();
         if constexpr (row_advance_via_ch1)
         {
             _llk_pack_fast_untilize_program_output_row_stride_(output_row_stride);
+            _llk_pack_fast_untilize_reset_output_row_counter_();
         }
         else
         {
@@ -373,17 +386,6 @@ inline void _llk_pack_fast_untilize_select_phase_()
     }
 
     select_packer_dest_registers<Dst>();
-}
-
-inline void _llk_pack_fast_untilize_reset_src_counters_()
-{
-    TTI_SETADCXY(p_setadc::PAC, 0, 0, 0, 0, 0b0011);
-    TTI_SETADCZW(p_setadc::PAC, 0, 0, 0, 0, 0b0101);
-}
-
-inline void _llk_pack_fast_untilize_reset_output_row_counter_()
-{
-    TTI_SETADCXY(p_setadc::PAC, 0, 0, 0, 0, 0b1000);
 }
 
 template <bool reset_output_row_counter = false>
@@ -456,14 +458,9 @@ inline void _llk_pack_fast_untilize_block_strided_(
 #endif
 
     program_packer_destination(address);
-    if constexpr (row_advance_via_ch1)
-    {
-        _llk_pack_fast_untilize_reset_output_row_counter_();
-    }
 
 #if FAST_UNTILIZE_STRIDED_MOP_REPLAY
     _llk_pack_fast_untilize_select_phase_<Dst, 128>();
-    _llk_pack_fast_untilize_reset_src_counters_();
     ckernel_template::run();
 
     // The row-close replay has already advanced L1_Dest_addr to output row 16.

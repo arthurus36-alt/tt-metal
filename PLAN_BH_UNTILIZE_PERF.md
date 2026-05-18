@@ -1166,8 +1166,9 @@ Kept implementation:
   `PCK0_ADDR_CTRL_XY_REG_1_Ystride` to the full output row stride in bytes.
 - Add `y_dst.incr=1` to `ADDR_MOD_1` and omit the per-row replay end-op from the
   strided MOP when ch1 row advance is active.
-- Reset ch1.Y at the start of each strided block and when restoring pack
-  counters, so repeated chunks start from the programmed base address.
+- Reset source counters and ch1.Y during init, then restore them after each
+  strided block. This lets the next block start from the known post-restore
+  state without repeating the phase-1 counter resets on the hot path.
 - Clear ch1 output stride/base only in fast-untilize uninit instantiations that
   actually use the strided ch1 path. Production and the LLK harness pass
   `full_ct_dim` through pack uninit for that compile-time gate.
@@ -1213,6 +1214,49 @@ Conclusion:
   `FAST_UNTILIZE_STRIDED_CH1_ROW_ADVANCE=0` as a fallback.
 - Remaining wide-row pack headroom is now shape-specific; the generic row-close
   replay cost is mostly gone from the default path.
+
+### 2026-05-18 strided counter-reset hoist
+
+Goal: remove redundant hot-path counter resets from the row-strided pack chunk.
+After the ch1 row-advance work, each strided chunk reset source PAC counters and
+ch1.Y before phase 1, then the standard post-block restore reset the same state
+again. The kept change moves the first phase's initial reset to init and relies
+on the existing post-block restore for every subsequent strided chunk.
+
+Kept implementation:
+- Move `_llk_pack_fast_untilize_reset_src_counters_` and
+  `_llk_pack_fast_untilize_reset_output_row_counter_` before init so init can
+  establish the first strided-block state.
+- For `full_ct_dim > block_ct_dim`, reset source counters during init.
+- For the ch1 row-advance path, reset ch1.Y during init.
+- Remove the per-strided-block phase-1 source reset and ch1.Y reset. Keep the
+  phase-2 source reset and the post-block restore boundary unchanged.
+
+Validation:
+- Focused multi-chunk correctness (`ct=8/12/16`, `rt=1/2/4`,
+  `Float16_b->Float16_b` and `Float32->Float16_b`, `SyncHalf`/`SyncFull`,
+  row-id/random) -> `72 passed`.
+- Full LLK correctness:
+  `python_env/bin/python3 -m pytest -q --tb=short -o log_cli=false tt_metal/tt-llk/tests/python_tests/test_fast_untilize.py`
+  -> `2160 passed in 399.26s`.
+- Wide perf gate:
+  `python_env/bin/python3 -m pytest -q --tb=short -o log_cli=false tt_metal/tt-llk/tests/python_tests/perf_fast_untilize.py -k 'loop_factor:16 and (ct_dim:5 or ct_dim:6 or ct_dim:7 or ct_dim:8 or ct_dim:9 or ct_dim:12 or ct_dim:16)'`
+  -> `378 passed, 1242 deselected in 401.35s`.
+
+Matched perf result:
+
+| scope | marker | run type | min delta | mean delta | max delta | regressions >2% |
+|:---|:---|:---|---:|---:|---:|---:|
+| `ct=8/12/16`, `loop_factor=1` | KERNEL | `L1_TO_L1` | `-1.62%` | `-0.70%` | `+0.29%` | 0 |
+| `ct=8/12/16`, `loop_factor=1` | KERNEL | `PACK_ISOLATE` | `-1.33%` | `-0.05%` | `+0.63%` | 0 |
+| `ct=8/12/16`, `loop_factor=16` | KERNEL | `L1_TO_L1` | `-1.77%` | `-1.04%` | `+0.03%` | 0 |
+| `ct=8/12/16`, `loop_factor=16` | KERNEL | `PACK_ISOLATE` | `-1.01%` | `-0.16%` | `+0.12%` | 0 |
+| `ct=8/12/16`, `loop_factor=16` | TILE_LOOP | `L1_TO_L1` | `-1.79%` | `-1.07%` | `+0.03%` | 0 |
+| `ct=8/12/16`, `loop_factor=16` | TILE_LOOP | `PACK_ISOLATE` | `-1.07%` | `-0.20%` | `+0.03%` | 0 |
+
+Wide-shape sanity for `ct=5/6/7/9` against the previous same-path wide run:
+KERNEL `L1_TO_L1` mean `-1.19%`, KERNEL `PACK_ISOLATE` mean `-0.49%`,
+with no >2% regressions.
 
 Next perf ideas, in preferred order:
 1. Profile remaining neutral/low-win shapes (`ct=8/12/16`, dest-acc fp32) to see
