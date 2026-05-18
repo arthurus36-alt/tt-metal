@@ -69,11 +69,9 @@ void kernel_main() {
         chunked_q_chunk_offset_phase_2 = get_arg_val<uint32_t>(10);
     }
 
-    // Global Q scheduling: single phase only (num_phases==1 is pinned by the SDPA program
-    // factory). Args sit right after chunked_q_chunk_offset_phase_1 (host packs them at slots
-    // 10..11). When disabled, slots 10..11 are unused by this kernel (num_phases==1 means
-    // arg 10 is also unused otherwise), so an unconditional read is safe — the lambda below
-    // only uses them in the enabled branch.
+    // Global Q scheduling args at slots 10..11. num_phases==1 is pinned by the SDPA program
+    // factory, so they don't collide with chunked_q_chunk_offset_phase_2 (slot 10 on the
+    // num_phases==2 path used by ring_distributed, which doesn't set global_q_scheduling).
     uint32_t global_q_start = 0;
     uint32_t global_q_count = 0;
     if constexpr (global_q_scheduling) {
@@ -238,11 +236,11 @@ void kernel_main() {
                 chunked_q_chunk_offset = chunked_q_chunk_offset_phase_2;
             }
 
-            // Run sdpa_standard once per (nb, nq, q_chunk) triple. Under global Q scheduling the
-            // outer iteration is a flat range over B*NQH*q_num_chunks chunks (iter_q_start/end pair
-            // collapses to one chunk, with local_q_start carrying the absolute q_chunk index).
-            // Under hierarchical scheduling the (nb, nq) loops iterate explicitly and
-            // sdpa_standard's inner loop walks q_chunks_per_core chunks per (nb, nq).
+            // Run sdpa_standard once per (nb, nq, q_chunk) triple. Hierarchical: (nb, nq) loop
+            // below iterates explicitly and sdpa_standard's inner loop walks q_chunks_per_core
+            // chunks starting at local_q_start. Global Q: outer iteration is a flat range over
+            // B*NQH*q_num_chunks, so iter_q_start/end collapses to a single chunk and
+            // inner_q_start carries the absolute q_chunk index.
             auto run_sdpa_standard = [&](uint32_t iter_q_start, uint32_t iter_q_end, uint32_t inner_q_start) {
                 sdpa_standard<
                     cb_qk_im,

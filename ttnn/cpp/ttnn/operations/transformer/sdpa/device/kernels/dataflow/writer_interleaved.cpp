@@ -58,10 +58,9 @@ void kernel_main() {
         write_offset_phase_2 = get_arg_val<uint32_t>(13);
     }
 
-    // Global Q scheduling: single phase only (num_phases==1 is pinned by the SDPA program
-    // factory). Host packs the global-Q args right after write_offset_phase_1 (slots 12..13).
-    // The num_phases==2 path (ring_distributed) doesn't use global_q_scheduling, so slots
-    // 12..13 never collide.
+    // Global Q scheduling args at slots 12..13. num_phases==1 is pinned by the SDPA program
+    // factory, so they don't collide with phase_2 offsets (slots 12..13 on the num_phases==2
+    // path used by ring_distributed, which doesn't set global_q_scheduling).
     uint32_t global_q_start = 0;
     uint32_t global_q_count = 0;
     if constexpr (global_q_scheduling) {

@@ -454,7 +454,7 @@ def test_sdpa_perf_check(shape_id, q_chunk_size, k_chunk_size, expected_util):
     _b, nh, s, d = INPUT_SHAPES[idx]
 
     subdir = "ttnn_sdpa_perf_check"
-    test_id = f"k{k_chunk_size}-q{q_chunk_size}-hier-bf16"
+    test_id = f"k{k_chunk_size}-q{q_chunk_size}-bf16"
     command = (
         f"pytest tests/nightly/blackhole/sdpa/"
         f"test_scaled_dot_product_attention_sprint.py::test_sdpa_sweep_perf_impl"
