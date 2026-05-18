@@ -116,13 +116,8 @@ jobs:
       - name: Resolve SKU selection
         id: resolve-skus
         run: |
-<<<<<<< HEAD
           ALL_SKUS="wh_n150,wh_n300,wh_llmbox,wh_llmbox_perf,wh_galaxy,wh_galaxy_perf,bh_p150,bh_loudbox,bh_p300,bh_quietbox_2,bh_galaxy,bh_galaxy_perf"
           VALID_SKUS="wh_n150 wh_n300 wh_llmbox wh_llmbox_perf wh_galaxy wh_galaxy_perf bh_p150 bh_loudbox bh_p300 bh_quietbox_2 bh_galaxy bh_galaxy_perf"
-=======
-          ALL_SKUS="wh_n150,wh_n300,wh_llmbox,wh_llmbox_perf,wh_galaxy,wh_galaxy_perf,bh_p150,bh_p300,bh_loudbox,bh_quietbox_2,bh_galaxy,bh_galaxy_perf"
-          VALID_SKUS="wh_n150 wh_n300 wh_llmbox wh_llmbox_perf wh_galaxy wh_galaxy_perf bh_p150 bh_p300 bh_loudbox bh_quietbox_2 bh_galaxy bh_galaxy_perf"
->>>>>>> d29ce8e6f41 (changes for gemma-4 vllm and bh)
           SKU_INPUT="${{ inputs.skus || 'all' }}"
 
           # Trim leading/trailing whitespace from the entire input
