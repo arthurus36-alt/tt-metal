@@ -425,11 +425,14 @@ public:
         // vector so the cache-hit fast path avoids one allocation per dispatch.
         // The reflection itself is already compile-time generated; this just removes
         // the runtime allocation tax.
-        static ttsl::SmallVector<tt::tt_metal::Buffer*, 16> collect_tensor_buffers(
+        // NOTE: returns std::vector (not SmallVector) on this branch. The SmallVector
+        // form requires #43675's span-based program_descriptor_patching signatures,
+        // which haven't merged into this branch's base. Restore SmallVector after rebase.
+        static std::vector<tt::tt_metal::Buffer*> collect_tensor_buffers(
             const tensor_args_t& tensor_args,
             const tensor_return_value_t& tensor_return_value,
             const resource_t& resources) {
-            ttsl::SmallVector<tt::tt_metal::Buffer*, 16> buffers;
+            std::vector<tt::tt_metal::Buffer*> buffers;
             extract_tensor_buffers_into(tensor_args, buffers);
             extract_tensor_buffers_into(tensor_return_value, buffers);
             if constexpr (has_prepare_resources) {
