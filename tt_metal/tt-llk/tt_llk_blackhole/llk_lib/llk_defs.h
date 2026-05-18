@@ -48,7 +48,7 @@ enum class DataCopyType : std::uint8_t
     B2D,
 };
 
-enum EltwiseBinaryType
+enum class EltwiseBinaryType : std::uint8_t
 {
     ELWMUL,
     ELWDIV,
